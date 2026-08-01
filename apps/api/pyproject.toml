@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brixta-cement-twin-api"
+version = "0.2.0"
+description = "Deterministic BRIXTA cement blend and machinery twin"
+requires-python = ">=3.11"
+dependencies = ["fastapi>=0.115,<1", "pydantic>=2.10,<3", "uvicorn[standard]>=0.34,<1"]
+
+[project.optional-dependencies]
+dev = ["httpx>=0.28,<1", "pytest>=8.3,<9"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
