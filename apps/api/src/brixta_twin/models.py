@@ -34,15 +34,19 @@ class MaterialCreate(BaseModel):
     processing_state: str = "as_received"
     applicable_blend_classes: list[str] = Field(default_factory=list)
     chemistry: Chemistry
-    cost_inr_per_t: float = Field(0, ge=0)
-    co2_kg_per_t: float = Field(0, ge=0)
+    cost_inr_per_t: float | None = Field(None, ge=0)
+    co2_kg_per_t: float | None = Field(None, ge=0)
     notes: str | None = None
+    data_gaps: list[str] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
 
 
 class Material(MaterialCreate):
     material_id: str
     version: int = 1
+    lineage_id: str | None = None
+    archived: bool = False
+    archived_at: datetime | None = None
     created_at: datetime
 
 
@@ -113,6 +117,9 @@ class Blend(BlendCreate):
     blend_id: str
     version: int = 1
     status: str = "simulated"
+    lineage_id: str | None = None
+    archived: bool = False
+    archived_at: datetime | None = None
     created_at: datetime
 
 
@@ -122,6 +129,7 @@ class ResolvedBlendComponent(BaseModel):
     material_type: str
     percentage: float
     evidence_class: str
+    material_version: int = 1
 
 
 class BlendPreview(BaseModel):
@@ -131,8 +139,8 @@ class BlendPreview(BaseModel):
     flattened_total_percentage: float
     flattened_components: list[ResolvedBlendComponent]
     chemistry: Chemistry
-    material_cost_inr_t: float
-    estimated_co2_kg_t: float
+    material_cost_inr_t: float | None
+    estimated_co2_kg_t: float | None
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -182,6 +190,9 @@ class Machine(MachineBase):
     conversion_fraction: float | None = None
     product_state: str | None = None
     version: int = 1
+    lineage_id: str | None = None
+    archived: bool = False
+    archived_at: datetime | None = None
     created_at: datetime
 
 
@@ -202,6 +213,13 @@ class RouteEdge(BaseModel):
 
 class RouteCreate(BaseModel):
     name: str
+    route_kind: Literal[
+        "integrated",
+        "grinding_only",
+        "integrated_lc3",
+        "clinker_only",
+        "custom",
+    ] = "custom"
     nodes: list[RouteNode]
     edges: list[RouteEdge]
 
@@ -209,16 +227,55 @@ class RouteCreate(BaseModel):
 class Route(RouteCreate):
     route_id: str
     version: int = 1
+    lineage_id: str | None = None
+    archived: bool = False
+    archived_at: datetime | None = None
+    created_at: datetime
+
+
+class MaterialCostEntry(BaseModel):
+    material_id: str
+    purchased_delivered_cost_inr_t: float | None = Field(None, ge=0)
+    internal_feed_cost_inr_t: float | None = Field(None, ge=0)
+    evidence_class: str = "assumed"
+    note: str | None = None
+
+
+class CostBookCreate(BaseModel):
+    name: str
+    effective_date: str | None = None
+    currency: str = "INR"
+    electricity_inr_kwh: float | None = Field(None, ge=0)
+    thermal_fuel_inr_mkcal: float | None = Field(None, ge=0)
+    packing_inr_t: float | None = Field(None, ge=0)
+    labour_inr_t: float | None = Field(None, ge=0)
+    maintenance_inr_t: float | None = Field(None, ge=0)
+    other_variable_inr_t: float | None = Field(None, ge=0)
+    factory_overhead_inr_t: float | None = Field(None, ge=0)
+    outbound_logistics_inr_t: float | None = Field(None, ge=0)
+    material_costs: list[MaterialCostEntry] = Field(default_factory=list)
+    evidence: list[Evidence] = Field(default_factory=list)
+    notes: str | None = None
+
+
+class CostBook(CostBookCreate):
+    cost_book_id: str
+    version: int = 1
+    lineage_id: str | None = None
+    archived: bool = False
+    archived_at: datetime | None = None
     created_at: datetime
 
 
 class RunRequest(BaseModel):
     blend_id: str
     route_id: str
+    cost_book_id: str | None = None
     target_output_tph: float = Field(gt=0)
     duration_hours: float = Field(24, gt=0)
     electricity_inr_kwh: float = Field(8.5, ge=0)
     thermal_fuel_inr_mkcal: float = Field(900, ge=0)
+    raw_meal_to_clinker_yield: float = Field(0.65, gt=0, le=1)
 
 
 class RunEvent(BaseModel):
@@ -229,24 +286,115 @@ class RunEvent(BaseModel):
     message: str
 
 
+class ValidationMessage(BaseModel):
+    severity: Literal["block", "warning", "info"]
+    code: str
+    message: str
+
+
+class AssumptionRecord(BaseModel):
+    key: str
+    value: str
+    basis: str
+
+
+class MachineRunMetric(BaseModel):
+    node_id: str
+    machine_id: str
+    machine_name: str
+    process_stage: str
+    throughput_factor_t_stage_per_t_cement: float
+    actual_throughput_tph: float
+    effective_capacity_tph: float
+    cement_equivalent_capacity_tph: float | None
+    load_percent: float
+    electricity_kwh_t_cement: float
+    thermal_kcal_kg_cement: float
+
+
+class MaterialRunMetric(BaseModel):
+    material_id: str
+    material_name: str
+    material_type: str
+    percentage: float
+    tonnes_per_hour: float
+    tonnes_per_run: float
+    applied_unit_cost_inr_t: float | None = None
+    cost_basis: str = "unknown"
+    cost_inr_t_cement: float | None
+    co2_kg_t_cement: float | None
+    evidence_class: str
+
+
+class CostBreakdown(BaseModel):
+    materials_inr_t: float | None
+    electricity_inr_t: float
+    thermal_inr_t: float
+    energy_inr_t: float
+    direct_model_cost_inr_t: float | None
+    packing_inr_t: float | None = None
+    labour_inr_t: float | None = None
+    maintenance_inr_t: float | None = None
+    other_variable_inr_t: float | None = None
+    plant_cash_cost_inr_t: float | None = None
+    factory_overhead_inr_t: float | None = None
+    outbound_logistics_inr_t: float | None = None
+    full_cost_inr_t: float | None = None
+    cost_book_name: str | None = None
+    excluded_costs: list[str] = Field(default_factory=list)
+
+
+class EnergyBreakdown(BaseModel):
+    electricity_kwh_t: float
+    thermal_kcal_kg: float
+    total_electricity_mwh: float
+    total_thermal_gcal: float
+
+
+class CarbonBreakdown(BaseModel):
+    materials_kg_co2_t: float | None
+    total_materials_tonnes: float
+    total_materials_kg_co2: float | None
+    exclusions: list[str] = Field(default_factory=list)
+
+
 class RunResult(BaseModel):
     run_id: str
     created_at: datetime
     request: RunRequest
+    calculation_version: str = "0.4.0"
+    blend_snapshot: Blend | None = None
+    route_snapshot: Route | None = None
+    cost_book_snapshot: CostBook | None = None
+    material_snapshots: list[Material] = Field(default_factory=list)
+    machine_snapshots: list[Machine] = Field(default_factory=list)
     chemistry: Chemistry
     lsf: float | None
     silica_modulus: float | None
     alumina_modulus: float | None
     bottleneck_tph: float
+    bottleneck_machine_id: str | None = None
+    bottleneck_machine_name: str | None = None
     achievable_output_tph: float
+    total_output_tonnes: float = 0
     electricity_kwh_t: float
     thermal_kcal_kg: float
-    material_cost_inr_t: float
+    material_cost_inr_t: float | None
     energy_cost_inr_t: float
-    estimated_co2_kg_t: float
+    direct_model_cost_inr_t: float | None = None
+    estimated_co2_kg_t: float | None
     resolved_components: list[ResolvedBlendComponent] = Field(default_factory=list)
-    warnings: list[str]
-    events: list[RunEvent]
+    material_metrics: list[MaterialRunMetric] = Field(default_factory=list)
+    machine_metrics: list[MachineRunMetric] = Field(default_factory=list)
+    cost_breakdown: CostBreakdown | None = None
+    energy_breakdown: EnergyBreakdown | None = None
+    carbon_breakdown: CarbonBreakdown | None = None
+    validation: list[ValidationMessage] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    information: list[str] = Field(default_factory=list)
+    assumptions: list[AssumptionRecord] = Field(default_factory=list)
+    evidence_references: list[Evidence] = Field(default_factory=list)
+    events: list[RunEvent] = Field(default_factory=list)
 
 
 def now() -> datetime:

@@ -96,6 +96,14 @@ def _compatibility_warnings(
             continue
         material_types.add(material.material_type)
         evidence_classes.update(item.evidence_class for item in material.evidence)
+        if material.data_gaps:
+            warnings.append(
+                f"{material.name} has unreported fields: {', '.join(material.data_gaps)}"
+            )
+        if material.cost_inr_per_t is None:
+            warnings.append(f"{material.name} has no cost value")
+        if material.co2_kg_per_t is None:
+            warnings.append(f"{material.name} has no CO2 factor")
         if material.applicable_blend_classes and (
             blend.blend_class not in material.applicable_blend_classes
         ):
@@ -147,6 +155,8 @@ def preview_blend(
     values = {key: 0.0 for key in Chemistry.model_fields}
     material_cost = 0.0
     co2 = 0.0
+    cost_complete = True
+    co2_complete = True
     resolved: list[ResolvedBlendComponent] = []
 
     for material_id, fraction in sorted(flattened.items()):
@@ -155,8 +165,14 @@ def preview_blend(
             raise ValueError(f"Unknown material {material_id}")
         for key in values:
             values[key] += getattr(material.chemistry, key) * fraction
-        material_cost += material.cost_inr_per_t * fraction
-        co2 += material.co2_kg_per_t * fraction
+        if material.cost_inr_per_t is None:
+            cost_complete = False
+        else:
+            material_cost += material.cost_inr_per_t * fraction
+        if material.co2_kg_per_t is None:
+            co2_complete = False
+        else:
+            co2 += material.co2_kg_per_t * fraction
         resolved.append(
             ResolvedBlendComponent(
                 material_id=material_id,
@@ -168,6 +184,7 @@ def preview_blend(
                     if material.evidence
                     else "unverified"
                 ),
+                material_version=material.version,
             )
         )
 
@@ -184,7 +201,7 @@ def preview_blend(
         flattened_total_percentage=round(flattened_total, 6),
         flattened_components=resolved,
         chemistry=Chemistry(**values),
-        material_cost_inr_t=material_cost,
-        estimated_co2_kg_t=co2,
+        material_cost_inr_t=material_cost if cost_complete else None,
+        estimated_co2_kg_t=co2 if co2_complete else None,
         warnings=_compatibility_warnings(repository, blend, flattened),
     )

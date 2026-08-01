@@ -4,9 +4,11 @@ from .models import (
     Blend,
     BlendComponent,
     Chemistry,
+    CostBook,
     Evidence,
     Machine,
     Material,
+    MaterialCostEntry,
     Route,
     RouteEdge,
     RouteNode,
@@ -45,6 +47,24 @@ def seed(repo: Repository) -> None:
         page="15",
         note="Bench chemistry and reserve-weighted total captured from the project report",
     )
+    cii_blends = Evidence(
+        evidence_class="literature",
+        source_title="CII — Blended Cement: Green, Durable & Sustainable (2022)",
+        page="10",
+        note="Captured reference compositions; product compliance still requires applicable testing",
+    )
+    cii_composite_trial = Evidence(
+        evidence_class="plant_trial_report",
+        source_title="CII composite cement plant trial case study",
+        page="24",
+        note="Captured plant trial recipe; transferability to another plant is unverified",
+    )
+    lc3_reference = Evidence(
+        evidence_class="literature",
+        source_title="Effects of Clay Type on the Properties of Limestone Calcined Clay Cement",
+        page="abstract / mix design",
+        note="Conventional LC3-50 composition captured from the research document",
+    )
 
     materials = [
         Material(
@@ -66,9 +86,10 @@ def seed(repo: Repository) -> None:
                 k2o=0,
                 loi=41.72,
             ),
-            cost_inr_per_t=500,
-            co2_kg_per_t=0,
+            cost_inr_per_t=None,
+            co2_kg_per_t=None,
             notes="Chemical average is evidenced; starter cost is not a delivered-cost validation.",
+            data_gaps=["SO3", "Na2O", "K2O", "delivered cost", "processing CO2"],
             evidence=[wah_pynkon, assumed],
         ),
         Material(
@@ -90,9 +111,10 @@ def seed(repo: Repository) -> None:
                 k2o=0,
                 loi=40.88,
             ),
-            cost_inr_per_t=0,
-            co2_kg_per_t=0,
+            cost_inr_per_t=None,
+            co2_kg_per_t=None,
             notes="Reserve-weighted chemistry. Delivered cost and processing emissions are not reported.",
+            data_gaps=["SO3", "Na2O", "K2O", "delivered cost", "processing CO2"],
             evidence=[lumshnong],
         ),
         Material(
@@ -114,9 +136,10 @@ def seed(repo: Repository) -> None:
                 k2o=0,
                 loi=41.77,
             ),
-            cost_inr_per_t=0,
-            co2_kg_per_t=0,
+            cost_inr_per_t=None,
+            co2_kg_per_t=None,
             notes="Higher-CaO bench scenario for quarry variability studies.",
+            data_gaps=["SO3", "Na2O", "K2O", "delivered cost", "processing CO2"],
             evidence=[lumshnong],
         ),
         Material(
@@ -138,9 +161,10 @@ def seed(repo: Repository) -> None:
                 k2o=0,
                 loi=37.65,
             ),
-            cost_inr_per_t=0,
-            co2_kg_per_t=0,
+            cost_inr_per_t=None,
+            co2_kg_per_t=None,
             notes="Lower-CaO, higher-silica bench scenario for quarry variability studies.",
+            data_gaps=["SO3", "Na2O", "K2O", "delivered cost", "processing CO2"],
             evidence=[lumshnong],
         ),
         Material(
@@ -157,13 +181,14 @@ def seed(repo: Repository) -> None:
                 fe2o3=3.3,
                 mgo=1.5,
                 so3=0.8,
-                na2o=0,
-                k2o=0,
+                na2o=0.0,
+                k2o=0.0,
                 loi=0.5,
             ),
             cost_inr_per_t=4200,
             co2_kg_per_t=850,
             evidence=[assumed],
+            data_gaps=["Na2O", "K2O"],
         ),
         Material(
             material_id="mat_reference_fly_ash",
@@ -179,13 +204,14 @@ def seed(repo: Repository) -> None:
                 fe2o3=7,
                 mgo=1.5,
                 so3=0.5,
-                na2o=0,
-                k2o=0,
+                na2o=0.0,
+                k2o=0.0,
                 loi=3,
             ),
             cost_inr_per_t=1100,
             co2_kg_per_t=25,
             evidence=[assumed],
+            data_gaps=["Na2O", "K2O"],
         ),
         Material(
             material_id="mat_reference_gypsum",
@@ -201,13 +227,14 @@ def seed(repo: Repository) -> None:
                 fe2o3=0.3,
                 mgo=0.4,
                 so3=44,
-                na2o=0,
-                k2o=0,
+                na2o=0.0,
+                k2o=0.0,
                 loi=20,
             ),
             cost_inr_per_t=1800,
             co2_kg_per_t=30,
             evidence=[assumed],
+            data_gaps=["Na2O", "K2O"],
         ),
         Material(
             material_id="mat_reference_calcined_clay",
@@ -223,19 +250,117 @@ def seed(repo: Repository) -> None:
                 fe2o3=3,
                 mgo=0.5,
                 so3=0.2,
-                na2o=0,
-                k2o=0,
+                na2o=0.0,
+                k2o=0.0,
                 loi=2.5,
             ),
             cost_inr_per_t=2300,
             co2_kg_per_t=180,
             evidence=[assumed],
+            data_gaps=["Na2O", "K2O"],
+        ),
+        Material(
+            material_id="mat_reference_ggbs",
+            created_at=now(),
+            name="Reference GGBFS",
+            material_type="ggbs",
+            processing_state="ground_feed_ready",
+            applicable_blend_classes=["finished_cement", "premix"],
+            chemistry=Chemistry(
+                cao=40,
+                sio2=35,
+                al2o3=13,
+                fe2o3=0.7,
+                mgo=8,
+                so3=1,
+                na2o=0.0,
+                k2o=0.0,
+                loi=1,
+            ),
+            cost_inr_per_t=1700,
+            co2_kg_per_t=65,
+            notes="Generic screening profile; replace with a supplier certificate and delivered quotation.",
+            data_gaps=["Na2O", "K2O", "source-specific glass content", "activity index"],
+            evidence=[assumed],
+        ),
+        Material(
+            material_id="mat_ground_wah_pynkon_proxy",
+            created_at=now(),
+            name="Ground Wah–Pynkon Limestone — Research Proxy",
+            material_type="limestone",
+            location="East Jaintia Hills, Meghalaya",
+            processing_state="ground_research_proxy",
+            applicable_blend_classes=["finished_cement", "premix"],
+            chemistry=Chemistry(cao=52.28, sio2=2.47, al2o3=0.75, fe2o3=0.71, mgo=0.67, so3=0, na2o=0, k2o=0, loi=41.72),
+            cost_inr_per_t=None,
+            co2_kg_per_t=None,
+            notes="Oxides copied from evidenced quarry chemistry; fineness, grindability, cost and finished-cement performance are not validated.",
+            data_gaps=["SO3", "Na2O", "K2O", "fineness", "grindability", "delivered cost", "processing CO2"],
+            evidence=[wah_pynkon, assumed],
+        ),
+        Material(
+            material_id="mat_ground_lumshnong_proxy",
+            created_at=now(),
+            name="Ground Lumshnong Limestone — Research Proxy",
+            material_type="limestone",
+            location="Lumshnong, East Jaintia Hills, Meghalaya",
+            processing_state="ground_research_proxy",
+            applicable_blend_classes=["finished_cement", "premix"],
+            chemistry=Chemistry(cao=50.51, sio2=3.55, al2o3=1.22, fe2o3=1.27, mgo=1.41, so3=0, na2o=0, k2o=0, loi=40.88),
+            cost_inr_per_t=None,
+            co2_kg_per_t=None,
+            notes="Oxides copied from reserve-weighted quarry chemistry; fineness, grindability, cost and finished-cement performance are not validated.",
+            data_gaps=["SO3", "Na2O", "K2O", "fineness", "grindability", "delivered cost", "processing CO2"],
+            evidence=[lumshnong, assumed],
         ),
     ]
     for item in materials:
         _save_missing(repo, "materials", item, item.material_id)
 
+    starter_cost_book = CostBook(
+        cost_book_id="cost_book_starter_v1",
+        created_at=now(),
+        name="Starter Screening Cost Book — Replace Inputs",
+        effective_date=None,
+        electricity_inr_kwh=8.5,
+        thermal_fuel_inr_mkcal=900,
+        packing_inr_t=None,
+        labour_inr_t=None,
+        maintenance_inr_t=None,
+        other_variable_inr_t=None,
+        factory_overhead_inr_t=None,
+        outbound_logistics_inr_t=None,
+        material_costs=[
+            MaterialCostEntry(
+                material_id=item.material_id,
+                purchased_delivered_cost_inr_t=item.cost_inr_per_t,
+                internal_feed_cost_inr_t=None,
+                evidence_class="assumed",
+                note="Purchased starter price copied from the material record. Internal feed cost intentionally left blank to prevent clinker-cost double counting.",
+            )
+            for item in materials
+        ],
+        evidence=[assumed],
+        notes="Screening template only. Create a new version with quotations, invoices and plant operating data.",
+    )
+    _save_missing(repo, "cost_books", starter_cost_book, starter_cost_book.cost_book_id)
+
     blends = [
+        Blend(
+            blend_id="blend_reference_opc_95_5",
+            created_at=now(),
+            status="reference",
+            name="Reference OPC 95/5",
+            blend_class="finished_cement",
+            family="OPC",
+            objective="reproduce_captured_reference",
+            applicable_standard="Reference composition; compliance review required",
+            components=[
+                BlendComponent(material_id="mat_reference_clinker", percentage=95),
+                BlendComponent(material_id="mat_reference_gypsum", percentage=5),
+            ],
+            evidence=[cii_blends],
+        ),
         Blend(
             blend_id="blend_reference_ppc",
             created_at=now(),
@@ -249,7 +374,74 @@ def seed(repo: Repository) -> None:
                 BlendComponent(material_id="mat_reference_fly_ash", percentage=31),
                 BlendComponent(material_id="mat_reference_gypsum", percentage=5),
             ],
-            evidence=[corpus],
+            evidence=[cii_blends],
+        ),
+        Blend(
+            blend_id="blend_reference_psc_38_57_5",
+            created_at=now(),
+            status="reference",
+            name="Reference PSC 38/57/5",
+            blend_class="finished_cement",
+            family="PSC",
+            objective="reproduce_captured_reference",
+            applicable_standard="Reference composition; compliance review required",
+            components=[
+                BlendComponent(material_id="mat_reference_clinker", percentage=38),
+                BlendComponent(material_id="mat_reference_ggbs", percentage=57),
+                BlendComponent(material_id="mat_reference_gypsum", percentage=5),
+            ],
+            evidence=[cii_blends],
+        ),
+        Blend(
+            blend_id="blend_reference_composite_45_25_25_5",
+            created_at=now(),
+            status="reference",
+            name="Reference Composite 45/25/25/5",
+            blend_class="finished_cement",
+            family="Composite cement",
+            objective="reproduce_captured_reference",
+            applicable_standard="Reference composition; compliance review required",
+            components=[
+                BlendComponent(material_id="mat_reference_clinker", percentage=45),
+                BlendComponent(material_id="mat_reference_fly_ash", percentage=25),
+                BlendComponent(material_id="mat_reference_ggbs", percentage=25),
+                BlendComponent(material_id="mat_reference_gypsum", percentage=5),
+            ],
+            evidence=[cii_blends],
+        ),
+        Blend(
+            blend_id="blend_plant_trial_composite_30_5_47_18_4_5",
+            created_at=now(),
+            status="reference",
+            name="Plant-Trial Composite 30.5/47/18/4.5",
+            blend_class="finished_cement",
+            family="Composite cement",
+            objective="reproduce_captured_plant_trial",
+            applicable_standard="Plant-trial evidence; independent compliance review required",
+            components=[
+                BlendComponent(material_id="mat_reference_clinker", percentage=30.5),
+                BlendComponent(material_id="mat_reference_ggbs", percentage=47),
+                BlendComponent(material_id="mat_reference_fly_ash", percentage=18),
+                BlendComponent(material_id="mat_reference_gypsum", percentage=4.5),
+            ],
+            evidence=[cii_composite_trial],
+        ),
+        Blend(
+            blend_id="blend_reference_lc3_50",
+            created_at=now(),
+            status="reference",
+            name="Reference LC3-50 50/30/15/5",
+            blend_class="finished_cement",
+            family="LC3",
+            objective="reproduce_captured_reference",
+            applicable_standard="Research reference; physical and compliance validation required",
+            components=[
+                BlendComponent(material_id="mat_reference_clinker", percentage=50),
+                BlendComponent(material_id="mat_reference_calcined_clay", percentage=30),
+                BlendComponent(material_id="mat_ground_wah_pynkon_proxy", percentage=15),
+                BlendComponent(material_id="mat_reference_gypsum", percentage=5),
+            ],
+            evidence=[lc3_reference, wah_pynkon],
         ),
         Blend(
             blend_id="blend_lc3_mineral_premix",
@@ -264,7 +456,7 @@ def seed(repo: Repository) -> None:
                     material_id="mat_reference_calcined_clay", percentage=66.666667
                 ),
                 BlendComponent(
-                    material_id="mat_wah_pynkon_limestone", percentage=33.333333
+                    material_id="mat_ground_wah_pynkon_proxy", percentage=33.333333
                 ),
             ],
             evidence=[corpus],
@@ -329,6 +521,7 @@ def seed(repo: Repository) -> None:
             availability=0.9 if heat else 0.93,
             specific_electricity_kwh_t=electricity,
             specific_heat_kcal_kg=heat,
+            capex_inr_crore=0,
             technology_readiness_level=9,
             maximum_temperature_c=1450 if heat else None,
             residence_time_minutes=35 if heat else None,
@@ -352,14 +545,34 @@ def seed(repo: Repository) -> None:
         ),
         machine("machine_cement_mill", "Cement Mill 01", "cement_grinding", 130, 29),
         machine("machine_packer", "Packer 01", "packing_dispatch", 120, 3),
+        Machine(
+            machine_id="machine_clay_calciner",
+            machine_kind="thermal",
+            created_at=now(),
+            name="Clay Calciner Research Baseline",
+            process_stage="clay_calcination",
+            rated_capacity_tph=50,
+            minimum_stable_tph=17.5,
+            availability=0.9,
+            specific_electricity_kwh_t=20,
+            specific_heat_kcal_kg=650,
+            capex_inr_crore=0,
+            technology_readiness_level=7,
+            maximum_temperature_c=850,
+            residence_time_minutes=40,
+            conversion_fraction=0.95,
+            product_state="calcined_clay",
+            evidence=[assumed],
+        ),
     ]
     for item in machines:
         _save_missing(repo, "machines", item, item.machine_id)
 
-    route = Route(
-        route_id="route_integrated_baseline",
+    integrated_route = Route(
+        route_id="route_integrated_baseline_v03",
         created_at=now(),
-        name="Integrated Plant Baseline",
+        name="Integrated Plant Baseline v0.3",
+        route_kind="integrated",
         nodes=[
             RouteNode(
                 node_id="crusher",
@@ -410,4 +623,37 @@ def seed(repo: Repository) -> None:
             )
         ],
     )
-    _save_missing(repo, "routes", route, route.route_id)
+    grinding_route = Route(
+        route_id="route_grinding_unit_v03",
+        created_at=now(),
+        name="Grinding Unit — Purchased Clinker",
+        route_kind="grinding_only",
+        nodes=[
+            RouteNode(node_id="cement_mill", machine_id="machine_cement_mill", label="Cement mill", position_x=180, position_y=80),
+            RouteNode(node_id="packer", machine_id="machine_packer", label="Packer", position_x=500, position_y=80),
+        ],
+        edges=[RouteEdge(edge_id="edge_grinding_1", source="cement_mill", target="packer")],
+    )
+    lc3_route = Route(
+        route_id="route_integrated_lc3_v03",
+        created_at=now(),
+        name="Integrated Plant + Clay Calciner — R&D",
+        route_kind="integrated_lc3",
+        nodes=[
+            RouteNode(node_id="crusher", machine_id="machine_crusher", label="Crusher", position_x=0, position_y=40),
+            RouteNode(node_id="raw_mill", machine_id="machine_raw_mill", label="Raw mill", position_x=220, position_y=40),
+            RouteNode(node_id="kiln", machine_id="machine_rotary_kiln", label="Kiln", position_x=440, position_y=40),
+            RouteNode(node_id="clay_calciner", machine_id="machine_clay_calciner", label="Clay calciner", position_x=440, position_y=210),
+            RouteNode(node_id="cement_mill", machine_id="machine_cement_mill", label="Cement mill", position_x=700, position_y=120),
+            RouteNode(node_id="packer", machine_id="machine_packer", label="Packer", position_x=960, position_y=120),
+        ],
+        edges=[
+            RouteEdge(edge_id="edge_lc3_1", source="crusher", target="raw_mill"),
+            RouteEdge(edge_id="edge_lc3_2", source="raw_mill", target="kiln"),
+            RouteEdge(edge_id="edge_lc3_3", source="kiln", target="cement_mill"),
+            RouteEdge(edge_id="edge_lc3_4", source="clay_calciner", target="cement_mill"),
+            RouteEdge(edge_id="edge_lc3_5", source="cement_mill", target="packer"),
+        ],
+    )
+    for route in [integrated_route, grinding_route, lc3_route]:
+        _save_missing(repo, "routes", route, route.route_id)
