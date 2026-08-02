@@ -41,6 +41,31 @@ RAW_MATERIALS = {
 FUEL_MATERIALS = {"coal", "petcoke", "biomass", "rdf", "alternative_fuel"}
 
 
+def chemistry_for_scenario(material: Material, scenario: str) -> Chemistry:
+    profile = (
+        material.chemistry_min
+        if scenario == "low"
+        else material.chemistry_max
+        if scenario == "high"
+        else None
+    )
+    if profile is None:
+        return material.chemistry
+    # A range profile may contain only the oxides that were actually sampled.
+    # Unspecified bounds inherit the typical value; they must not become a
+    # new data gap merely because (for example) only CaO variability is known.
+    return Chemistry(
+        **{
+            oxide: (
+                getattr(profile, oxide)
+                if getattr(profile, oxide) is not None
+                else getattr(material.chemistry, oxide)
+            )
+            for oxide in Chemistry.model_fields
+        }
+    )
+
+
 def _expand_components(
     repository: Repository,
     blend: BlendCreate,
@@ -89,12 +114,14 @@ def _compatibility_warnings(
 ) -> list[str]:
     warnings: list[str] = []
     material_types: set[str] = set()
+    functional_roles: set[str] = set()
     evidence_classes: set[str] = set()
     for material_id in flattened:
         material = repository.get("materials", material_id)
         if not isinstance(material, Material):
             continue
         material_types.add(material.material_type)
+        functional_roles.add(material.functional_role)
         evidence_classes.update(item.evidence_class for item in material.evidence)
         if material.data_gaps:
             warnings.append(
@@ -112,31 +139,32 @@ def _compatibility_warnings(
             )
 
     if blend.blend_class == "finished_cement":
-        incompatible = material_types - FINISHED_CEMENT_MATERIALS
-        if incompatible:
+        allowed_roles = {"clinker", "cement_addition", "set_regulator", "process_additive", "recycled_process_material"}
+        incompatible_roles = functional_roles - allowed_roles
+        if incompatible_roles:
             warnings.append(
-                "Finished cement contains incompatible material types: "
-                + ", ".join(sorted(incompatible))
+                "Finished cement contains incompatible functional roles: "
+                + ", ".join(sorted(incompatible_roles))
             )
-        if "clinker" not in material_types:
+        if "clinker" not in functional_roles:
             warnings.append("Finished cement contains no clinker component")
-        if "gypsum" not in material_types:
+        if "set_regulator" not in functional_roles:
             warnings.append("Finished cement contains no gypsum or set regulator")
     elif blend.blend_class in {"raw_material_stockpile", "raw_meal"}:
-        incompatible = material_types - RAW_MATERIALS
-        if incompatible:
+        incompatible_roles = functional_roles - {"raw_kiln_feed", "corrective", "recycled_process_material"}
+        if incompatible_roles:
             warnings.append(
-                "Raw-material blend contains incompatible material types: "
-                + ", ".join(sorted(incompatible))
+                "Raw-material blend contains incompatible functional roles: "
+                + ", ".join(sorted(incompatible_roles))
             )
     elif blend.blend_class == "fuel_blend":
-        incompatible = material_types - FUEL_MATERIALS
-        if incompatible:
+        incompatible_roles = functional_roles - {"fuel", "alternative_fuel"}
+        if incompatible_roles:
             warnings.append(
-                "Fuel blend contains non-fuel material types: "
-                + ", ".join(sorted(incompatible))
+                "Fuel blend contains non-fuel functional roles: "
+                + ", ".join(sorted(incompatible_roles))
             )
-    elif blend.blend_class == "clinker_blend" and material_types - {"clinker"}:
+    elif blend.blend_class == "clinker_blend" and functional_roles - {"clinker"}:
         warnings.append("Clinker blend contains a material that is not classified as clinker")
 
     if not evidence_classes:
@@ -150,9 +178,11 @@ def preview_blend(
     repository: Repository,
     blend: BlendCreate,
     root_id: str | None = None,
+    chemistry_scenario: str = "typical",
 ) -> BlendPreview:
     flattened = flatten_blend(repository, blend, root_id=root_id)
-    values = {key: 0.0 for key in Chemistry.model_fields}
+    values: dict[str, float | None] = {key: 0.0 for key in Chemistry.model_fields}
+    unknown_fields: set[str] = set()
     material_cost = 0.0
     co2 = 0.0
     cost_complete = True
@@ -163,8 +193,15 @@ def preview_blend(
         material = repository.get("materials", material_id)
         if not isinstance(material, Material):
             raise ValueError(f"Unknown material {material_id}")
+        selected_chemistry = chemistry_for_scenario(material, chemistry_scenario)
         for key in values:
-            values[key] += getattr(material.chemistry, key) * fraction
+            oxide = getattr(selected_chemistry, key)
+            accumulated = values[key]
+            if oxide is None:
+                unknown_fields.add(key)
+                values[key] = None
+            elif accumulated is not None:
+                values[key] = accumulated + oxide * fraction
         if material.cost_inr_per_t is None:
             cost_complete = False
         else:
@@ -194,6 +231,12 @@ def preview_blend(
         raise ValueError(
             f"Flattened blend totals {flattened_total:.4f}%; expected 100.00%"
         )
+    warnings = _compatibility_warnings(repository, blend, flattened)
+    if unknown_fields:
+        warnings.append(
+            "Weighted chemistry is incomplete because these fields are unknown: "
+            + ", ".join(sorted(field.upper() for field in unknown_fields))
+        )
     return BlendPreview(
         blend_name=blend.name,
         blend_class=blend.blend_class,
@@ -201,7 +244,10 @@ def preview_blend(
         flattened_total_percentage=round(flattened_total, 6),
         flattened_components=resolved,
         chemistry=Chemistry(**values),
+        chemistry_scenario=chemistry_scenario,  # type: ignore[arg-type]
+        chemistry_complete=not unknown_fields,
+        unknown_chemistry_fields=sorted(unknown_fields),
         material_cost_inr_t=material_cost if cost_complete else None,
         estimated_co2_kg_t=co2 if co2_complete else None,
-        warnings=_compatibility_warnings(repository, blend, flattened),
+        warnings=warnings,
     )

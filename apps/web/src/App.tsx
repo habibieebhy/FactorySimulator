@@ -11,11 +11,12 @@ import {
 } from "@xyflow/react";
 
 import { API, req } from "./api";
+import { AccuracyWorkspace } from "./AccuracyWorkspace";
 import { BlendWorkspace } from "./BlendWorkspace";
 import { CostBookWorkspace } from "./CostBookWorkspace";
 import { LibraryManager } from "./LibraryManager";
 import { RouteWorkspace } from "./RouteWorkspace";
-import type { Blend, CostBook, Machine, Material, Result, Route } from "./types";
+import type { Blend, CostBook, Machine, Material, QualityMeasurements, Result, Route, RouteRecommendationSet } from "./types";
 
 function number(value: number | null, unit: string, digits = 1): string {
   return value === null ? "N/A" : `${value.toFixed(digits)}${unit}`;
@@ -57,10 +58,15 @@ const nodeTypes = { process: ProcessNode };
 export function App() {
   const [view, setView] = useState("console");
   const [materials, setMaterials] = useState<Material[]>([]);
+  const [archivedMaterials, setArchivedMaterials] = useState<Material[]>([]);
   const [blends, setBlends] = useState<Blend[]>([]);
+  const [archivedBlends, setArchivedBlends] = useState<Blend[]>([]);
   const [machines, setMachines] = useState<Machine[]>([]);
+  const [archivedMachines, setArchivedMachines] = useState<Machine[]>([]);
   const [routes, setRoutes] = useState<Route[]>([]);
+  const [archivedRoutes, setArchivedRoutes] = useState<Route[]>([]);
   const [costBooks, setCostBooks] = useState<CostBook[]>([]);
+  const [archivedCostBooks, setArchivedCostBooks] = useState<CostBook[]>([]);
   const [runs, setRuns] = useState<Result[]>([]);
   const [blendId, setBlendId] = useState("");
   const [routeId, setRouteId] = useState("");
@@ -70,28 +76,49 @@ export function App() {
   const [electricityTariff, setElectricityTariff] = useState(8.5);
   const [thermalTariff, setThermalTariff] = useState(900);
   const [rawMealYield, setRawMealYield] = useState(0.65);
+  const [autoMassConversion, setAutoMassConversion] = useState(true);
+  const [chemistryScenario, setChemistryScenario] = useState<"low" | "typical" | "high">("typical");
+  const [targetBlaine, setTargetBlaine] = useState(320);
+  const [fuelMaterialId, setFuelMaterialId] = useState("");
+  const [fuelRate, setFuelRate] = useState("");
+  const [kilnMoisture, setKilnMoisture] = useState("");
+  const [kilnOxygen, setKilnOxygen] = useState("");
+  const [kilnTemperature, setKilnTemperature] = useState("");
+  const [freeLime, setFreeLime] = useState("");
+  const [quality, setQuality] = useState<Record<keyof QualityMeasurements, string>>({ blaine_m2_kg: "", initial_setting_minutes: "", final_setting_minutes: "", le_chatelier_mm: "", autoclave_expansion_percent: "", strength_3d_mpa: "", strength_7d_mpa: "", strength_28d_mpa: "" });
+  const [routeAdvice, setRouteAdvice] = useState<RouteRecommendationSet | null>(null);
   const [result, setResult] = useState<Result | null>(null);
   const [visible, setVisible] = useState(0);
   const [error, setError] = useState("");
 
   async function load() {
     const [loadedMaterials, loadedBlends, loadedMachines, loadedRoutes, loadedCostBooks, loadedRuns] = await Promise.all([
-      req<Material[]>("/api/materials"),
-      req<Blend[]>("/api/blends"),
-      req<Machine[]>("/api/machines"),
-      req<Route[]>("/api/routes"),
-      req<CostBook[]>("/api/cost-books"),
+      req<Material[]>("/api/materials?include_archived=true"),
+      req<Blend[]>("/api/blends?include_archived=true"),
+      req<Machine[]>("/api/machines?include_archived=true"),
+      req<Route[]>("/api/routes?include_archived=true"),
+      req<CostBook[]>("/api/cost-books?include_archived=true"),
       req<Result[]>("/api/runs"),
     ]);
-    setMaterials(loadedMaterials);
-    setBlends(loadedBlends);
-    setMachines(loadedMachines);
-    setRoutes(loadedRoutes);
-    setCostBooks(loadedCostBooks);
+    const activeMaterials = loadedMaterials.filter((item) => !item.archived);
+    const activeBlends = loadedBlends.filter((item) => !item.archived);
+    const activeMachines = loadedMachines.filter((item) => !item.archived);
+    const activeRoutes = loadedRoutes.filter((item) => !item.archived);
+    const activeCostBooks = loadedCostBooks.filter((item) => !item.archived);
+    setMaterials(activeMaterials);
+    setArchivedMaterials(loadedMaterials.filter((item) => item.archived));
+    setBlends(activeBlends);
+    setArchivedBlends(loadedBlends.filter((item) => item.archived));
+    setMachines(activeMachines);
+    setArchivedMachines(loadedMachines.filter((item) => item.archived));
+    setRoutes(activeRoutes);
+    setArchivedRoutes(loadedRoutes.filter((item) => item.archived));
+    setCostBooks(activeCostBooks);
+    setArchivedCostBooks(loadedCostBooks.filter((item) => item.archived));
     setRuns(loadedRuns);
-    setBlendId((current) => current || loadedBlends.find((blend) => blend.blend_id === "blend_reference_ppc")?.blend_id || loadedBlends[0]?.blend_id || "");
-    setRouteId((current) => current || loadedRoutes.find((route) => route.route_id === "route_integrated_baseline_v03")?.route_id || loadedRoutes[0]?.route_id || "");
-    setCostBookId((current) => current || loadedCostBooks[0]?.cost_book_id || "");
+    setBlendId((current) => activeBlends.some((blend) => blend.blend_id === current) ? current : activeBlends.find((blend) => blend.blend_id === "blend_reference_ppc")?.blend_id || activeBlends[0]?.blend_id || "");
+    setRouteId((current) => activeRoutes.some((route) => route.route_id === current) ? current : activeRoutes.find((route) => route.route_id === "route_integrated_baseline_v03")?.route_id || activeRoutes[0]?.route_id || "");
+    setCostBookId((current) => activeCostBooks.some((book) => book.cost_book_id === current) ? current : activeCostBooks[0]?.cost_book_id || "");
   }
 
   useEffect(() => {
@@ -104,6 +131,16 @@ export function App() {
       return () => window.clearTimeout(timer);
     }
   }, [result, visible]);
+
+  useEffect(() => {
+    if (!blendId) { setRouteAdvice(null); return; }
+    const timer = window.setTimeout(() => {
+      req<RouteRecommendationSet>(`/api/route-recommendations?blend_id=${encodeURIComponent(blendId)}&target_output_tph=${target}&selected_route_id=${encodeURIComponent(routeId)}`)
+        .then(setRouteAdvice)
+        .catch(() => setRouteAdvice(null));
+    }, 160);
+    return () => window.clearTimeout(timer);
+  }, [blendId, routeId, target, routes]);
 
   const route = routes.find((item) => item.route_id === routeId);
   const machineMap = useMemo(() => new Map(machines.map((machine) => [machine.machine_id, machine])), [machines]);
@@ -131,24 +168,37 @@ export function App() {
   });
   const edges: Edge[] = (route?.edges ?? []).map((edge) => ({ id: edge.edge_id, source: edge.source, target: edge.target, animated: Boolean(result) }));
 
+  const optionalNumber = (value: string) => value.trim() === "" ? null : Number(value);
+  function runPayload() {
+    return {
+      blend_id: blendId, route_id: routeId, cost_book_id: costBookId || null,
+      target_output_tph: target, duration_hours: duration,
+      electricity_inr_kwh: electricityTariff, thermal_fuel_inr_mkcal: thermalTariff,
+      raw_meal_to_clinker_yield: rawMealYield, auto_mass_conversion: autoMassConversion,
+      chemistry_scenario: chemistryScenario, target_blaine_m2_kg: targetBlaine || null,
+      fuel_material_id: fuelMaterialId || null, fuel_rate_kg_t_clinker: optionalNumber(fuelRate),
+      kiln_feed_moisture_percent: optionalNumber(kilnMoisture), kiln_oxygen_percent: optionalNumber(kilnOxygen),
+      kiln_temperature_c: optionalNumber(kilnTemperature), clinker_free_lime_percent: optionalNumber(freeLime),
+      quality_measurements: Object.fromEntries(Object.entries(quality).map(([key, value]) => [key, optionalNumber(value)])),
+    };
+  }
+
   async function run() {
     setError("");
     setVisible(0);
     const nextResult = await req<Result>("/api/runs", {
       method: "POST",
-      body: JSON.stringify({
-        blend_id: blendId,
-        route_id: routeId,
-        cost_book_id: costBookId || null,
-        target_output_tph: target,
-        duration_hours: duration,
-        electricity_inr_kwh: electricityTariff,
-        thermal_fuel_inr_mkcal: thermalTariff,
-        raw_meal_to_clinker_yield: rawMealYield,
-      }),
+      body: JSON.stringify(runPayload()),
     });
     setResult(nextResult);
     setRuns((current) => [nextResult, ...current]);
+  }
+
+  async function runVariability() {
+    setError(""); setVisible(0);
+    const results = await req<Result[]>("/api/runs/variability", { method: "POST", body: JSON.stringify(runPayload()) });
+    const typical = results.find((item) => item.chemistry_scenario === "typical") ?? results[0] ?? null;
+    setResult(typical); setVisible(typical?.events.length ?? 0); setRuns((current) => [...results, ...current]);
   }
 
   function openRun(runResult: Result) {
@@ -162,6 +212,17 @@ export function App() {
     setElectricityTariff(runResult.request.electricity_inr_kwh);
     setThermalTariff(runResult.request.thermal_fuel_inr_mkcal);
     setRawMealYield(runResult.request.raw_meal_to_clinker_yield);
+    setAutoMassConversion(runResult.request.auto_mass_conversion);
+    setChemistryScenario(runResult.request.chemistry_scenario);
+    setTargetBlaine(runResult.request.target_blaine_m2_kg ?? 320);
+    setFuelMaterialId(runResult.request.fuel_material_id ?? "");
+    setFuelRate(runResult.request.fuel_rate_kg_t_clinker?.toString() ?? "");
+    setKilnMoisture(runResult.request.kiln_feed_moisture_percent?.toString() ?? "");
+    setKilnOxygen(runResult.request.kiln_oxygen_percent?.toString() ?? "");
+    setKilnTemperature(runResult.request.kiln_temperature_c?.toString() ?? "");
+    setFreeLime(runResult.request.clinker_free_lime_percent?.toString() ?? "");
+    const measured = runResult.request.quality_measurements ?? {};
+    setQuality((current) => Object.fromEntries(Object.keys(current).map((key) => [key, measured[key as keyof QualityMeasurements]?.toString() ?? ""])) as Record<keyof QualityMeasurements, string>);
     setView("console");
   }
 
@@ -171,7 +232,7 @@ export function App() {
         <b>BRIXTA CEMENT TWIN LAB</b>
         <span>{result?.run_id ?? "NO ACTIVE RUN"}</span>
         <nav>
-          {["console", "blend", "machine", "route", "costs", "runs", "library"].map((item) => (
+          {["console", "blend", "machine", "route", "accuracy", "costs", "runs", "library"].map((item) => (
             <button className={view === item ? "selected" : ""} onClick={() => setView(item)} key={item}>{item.toUpperCase()}</button>
           ))}
         </nav>
@@ -185,7 +246,10 @@ export function App() {
             <label>COST BOOK<select value={costBookId} onChange={(event) => { const id = event.target.value; setCostBookId(id); const book = costBooks.find((item) => item.cost_book_id === id); if (book?.electricity_inr_kwh !== null && book?.electricity_inr_kwh !== undefined) setElectricityTariff(book.electricity_inr_kwh); if (book?.thermal_fuel_inr_mkcal !== null && book?.thermal_fuel_inr_mkcal !== undefined) setThermalTariff(book.thermal_fuel_inr_mkcal); }}><option value="">No cost book — legacy fallback</option>{costBooks.map((item) => <option value={item.cost_book_id} key={item.cost_book_id}>{item.name} · v{item.version}</option>)}</select></label>
             <label>TARGET T/H CEMENT<input type="number" min="0.1" value={target} onChange={(event) => setTarget(Number(event.target.value))} /></label>
             <button className="run" disabled={!blendId || !routeId} onClick={() => void run().catch((caught) => setError(String(caught)))}>RUN SIMULATION</button>
+            <button disabled={!blendId || !routeId} onClick={() => void runVariability().catch((caught) => setError(String(caught)))}>RUN LOW / TYPICAL / HIGH</button>
           </section>
+          {routeAdvice?.selected && <section className={`route-explainer ${routeAdvice.selected.compatible ? "compatible" : "incompatible"}`}><div><strong>SELECTED ROUTE · {routeAdvice.selected.route_name}</strong><span>{routeAdvice.selected.description}</span><code>{routeAdvice.selected.flow_summary}</code></div><div><strong>{routeAdvice.selected.compatibility_score.toFixed(0)}/100 · {routeAdvice.selected.predicted_output_tph?.toFixed(1) ?? "N/A"} t/h</strong><span>{routeAdvice.selected.compatible ? "Compatible screening route" : `Missing: ${routeAdvice.selected.missing_stages.map(pretty).join(", ") || "usable capacity"}`}</span><span>Bottleneck: {routeAdvice.selected.bottleneck_machine_name ?? "N/A"}</span></div></section>}
+          {routeAdvice && <details className="route-shortlist"><summary>NEAREST ALTERNATIVE ROUTES TO TRY / RANKED FOR THIS BLEND AND TARGET</summary><div className="recommendation-grid">{routeAdvice.recommendations.filter((advice) => advice.route_id !== routeId).slice(0, 5).map((advice, index) => <div key={advice.route_id}><strong>#{index + 1} · {advice.route_name}</strong><span>{advice.compatibility_score.toFixed(0)}/100 · {advice.predicted_output_tph?.toFixed(1) ?? "N/A"} t/h · {advice.bottleneck_machine_name ?? "no bottleneck"}</span><span>{advice.reasons.join(" · ")}</span><button onClick={() => setRouteId(advice.route_id)}>TRY THIS ROUTE</button></div>)}</div></details>}
           <details className="basis-panel">
             <summary>RUN BASIS / TARIFFS / MASS-CONVERSION ASSUMPTIONS</summary>
             <div className="basis-grid">
@@ -193,8 +257,13 @@ export function App() {
               <label>ELECTRICITY ₹/KWH<input type="number" min="0" step="0.1" value={electricityTariff} onChange={(event) => setElectricityTariff(Number(event.target.value))} /></label>
               <label>THERMAL FUEL ₹/MILLION KCAL<input type="number" min="0" value={thermalTariff} onChange={(event) => setThermalTariff(Number(event.target.value))} /></label>
               <label>RAW MEAL → CLINKER YIELD<input type="number" min="0.3" max="1" step="0.01" value={rawMealYield} onChange={(event) => setRawMealYield(Number(event.target.value))} /></label>
+              <label>CHEMISTRY SCENARIO<select value={chemistryScenario} onChange={(event) => setChemistryScenario(event.target.value as "low" | "typical" | "high")}><option value="low">Low profile</option><option value="typical">Typical</option><option value="high">High profile</option></select></label>
+              <label>TARGET BLAINE M²/KG<input type="number" min="1" value={targetBlaine} onChange={(event) => setTargetBlaine(Number(event.target.value))} /></label>
+              <label className="check-line"><input type="checkbox" checked={autoMassConversion} onChange={(event) => setAutoMassConversion(event.target.checked)} /> AUTO YIELD FROM RAW-MEAL LOI</label>
             </div>
           </details>
+          <details className="basis-panel"><summary>KILN / FUEL-ASH OPERATING ENVELOPE</summary><div className="basis-grid"><label>FUEL MATERIAL<select value={fuelMaterialId} onChange={(event) => setFuelMaterialId(event.target.value)}><option value="">No fuel-ash model</option>{materials.filter((item) => ["fuel", "alternative_fuel"].includes(item.functional_role)).map((item) => <option value={item.material_id} key={item.material_id}>{item.name}</option>)}</select></label><label>FUEL RATE KG/T CLINKER<input type="number" value={fuelRate} onChange={(event) => setFuelRate(event.target.value)} /></label><label>KILN FEED MOISTURE %<input type="number" value={kilnMoisture} onChange={(event) => setKilnMoisture(event.target.value)} /></label><label>KILN O₂ %<input type="number" value={kilnOxygen} onChange={(event) => setKilnOxygen(event.target.value)} /></label><label>KILN TEMPERATURE °C<input type="number" value={kilnTemperature} onChange={(event) => setKilnTemperature(event.target.value)} /></label><label>MEASURED FREE LIME %<input type="number" value={freeLime} onChange={(event) => setFreeLime(event.target.value)} /></label></div></details>
+          <details className="basis-panel"><summary>OPC 43 MEASURED PRODUCTION GATE</summary><p className="note">Leave untested values blank. The gate will remain REVIEW; it never predicts strength from oxide chemistry.</p><div className="basis-grid">{Object.entries(quality).map(([key, value]) => <label key={key}>{pretty(key)}<input type="number" value={value} onChange={(event) => setQuality((current) => ({ ...current, [key]: event.target.value }))} /></label>)}</div></details>
           {error && <div className="err">{error}</div>}
           {result && <ResultSummary result={result} />}
           <section className="workspace">
@@ -222,9 +291,10 @@ export function App() {
       {view === "blend" && <BlendWorkspace materials={materials} blends={blends} onMaterialCreated={(material) => setMaterials((current) => [...current, material])} onBlendCreated={(blend) => { setBlends((current) => [...current, blend]); setBlendId(blend.blend_id); setView("console"); }} />}
       {view === "machine" && <MachineGuide done={(machine) => { setMachines((current) => [...current, machine]); setView("route"); }} />}
       {view === "route" && <RouteWorkspace machines={machines} routes={routes} done={(newRoute) => { setRoutes((current) => [...current, newRoute]); setRouteId(newRoute.route_id); setView("console"); }} />}
+      {view === "accuracy" && <AccuracyWorkspace materials={materials} runs={runs} blendCreated={(blend) => { setBlends((current) => [...current, blend]); setBlendId(blend.blend_id); setView("console"); }} />}
       {view === "costs" && <CostBookWorkspace materials={materials} costBooks={costBooks} done={(costBook) => { setCostBooks((current) => [...current, costBook]); setCostBookId(costBook.cost_book_id); setView("console"); }} />}
       {view === "runs" && <RunLibrary runs={runs} openRun={openRun} />}
-      {view === "library" && <LibraryManager materials={materials} blends={blends} machines={machines} routes={routes} costBooks={costBooks} refresh={load} />}
+      {view === "library" && <LibraryManager materials={materials} archivedMaterials={archivedMaterials} blends={blends} archivedBlends={archivedBlends} machines={machines} archivedMachines={archivedMachines} routes={routes} archivedRoutes={archivedRoutes} costBooks={costBooks} archivedCostBooks={archivedCostBooks} refresh={load} />}
     </main>
   );
 }
@@ -265,10 +335,13 @@ function RunReport({ result }: { result: Result }) {
       </details>
 
       <div className="report-grid">
-        <details open><summary>WEIGHTED CHEMISTRY / MASS %</summary><div className="chemistry-grid">{Object.entries(result.chemistry).map(([oxide, value]) => <div key={oxide}><small>{oxide.toUpperCase()}</small><strong>{value.toFixed(3)}%</strong></div>)}</div><div className="moduli"><span>LSF {result.lsf === null ? "N/A — raw meal only" : result.lsf.toFixed(2)}</span><span>SM {result.silica_modulus?.toFixed(3) ?? "N/A"}</span><span>AM {result.alumina_modulus?.toFixed(3) ?? "N/A"}</span></div></details>
+        <details open><summary>WEIGHTED CHEMISTRY / MASS %</summary><div className="chemistry-grid">{Object.entries(result.chemistry).map(([oxide, value]) => <div key={oxide}><small>{oxide.toUpperCase()}</small><strong>{value === null ? "UNKNOWN" : `${value.toFixed(3)}%`}</strong></div>)}</div><div className="moduli"><span>LSF {result.lsf === null ? "N/A — raw meal only or chemistry incomplete" : result.lsf.toFixed(2)}</span><span>SM {result.silica_modulus?.toFixed(3) ?? "N/A"}</span><span>AM {result.alumina_modulus?.toFixed(3) ?? "N/A"}</span></div></details>
         <details open><summary>COST / INCLUDED AND EXCLUDED</summary>{result.cost_breakdown && <div className="key-values"><span>Materials</span><strong>{money(result.cost_breakdown.materials_inr_t)}</strong><span>Electricity</span><strong>{money(result.cost_breakdown.electricity_inr_t)}</strong><span>Thermal fuel</span><strong>{money(result.cost_breakdown.thermal_inr_t)}</strong><span>Direct model total</span><strong>{money(result.cost_breakdown.direct_model_cost_inr_t)}</strong><span>Packing</span><strong>{money(result.cost_breakdown.packing_inr_t)}</strong><span>Labour</span><strong>{money(result.cost_breakdown.labour_inr_t)}</strong><span>Maintenance</span><strong>{money(result.cost_breakdown.maintenance_inr_t)}</strong><span>Other variable</span><strong>{money(result.cost_breakdown.other_variable_inr_t)}</strong><span>Plant cash cost</span><strong>{money(result.cost_breakdown.plant_cash_cost_inr_t)}</strong><span>Factory overhead</span><strong>{money(result.cost_breakdown.factory_overhead_inr_t)}</strong><span>Outbound logistics</span><strong>{money(result.cost_breakdown.outbound_logistics_inr_t)}</strong><span>Full cost estimate</span><strong>{money(result.cost_breakdown.full_cost_inr_t)}</strong></div>}<p className="note">Cost book: {result.cost_breakdown?.cost_book_name ?? "none"}. Excludes: {result.cost_breakdown?.excluded_costs.join(", ")}</p></details>
         <details open><summary>ENERGY / RUN TOTALS</summary>{result.energy_breakdown && <div className="key-values"><span>Electricity intensity</span><strong>{number(result.energy_breakdown.electricity_kwh_t, " kWh/t")}</strong><span>Thermal intensity</span><strong>{number(result.energy_breakdown.thermal_kcal_kg, " kcal/kg")}</strong><span>Total electricity</span><strong>{number(result.energy_breakdown.total_electricity_mwh, " MWh")}</strong><span>Total thermal energy</span><strong>{number(result.energy_breakdown.total_thermal_gcal, " Gcal")}</strong></div>}</details>
         <details open><summary>CARBON / MATERIAL SCOPE</summary>{result.carbon_breakdown && <div className="key-values"><span>Material CO₂ intensity</span><strong>{number(result.carbon_breakdown.materials_kg_co2_t, " kg/t", 1)}</strong><span>Run material output</span><strong>{number(result.carbon_breakdown.total_materials_tonnes, " t", 1)}</strong><span>Total material CO₂</span><strong>{result.carbon_breakdown.total_materials_kg_co2 === null ? "N/A" : number(result.carbon_breakdown.total_materials_kg_co2 / 1000, " t CO₂", 1)}</strong></div>}<p className="note">Excludes: {result.carbon_breakdown?.exclusions.join(", ")}</p></details>
+        <details open><summary>ROUTE / WHY THIS PATH</summary>{result.route_analysis ? <><div className="key-values"><span>Route kind</span><strong>{pretty(result.route_analysis.route_kind)}</strong><span>Compatibility</span><strong>{result.route_analysis.compatibility_score.toFixed(0)}/100</strong><span>Predicted route capacity</span><strong>{number(result.route_analysis.predicted_output_tph, " t/h")}</strong><span>Route bottleneck</span><strong>{result.route_analysis.bottleneck_machine_name ?? "N/A"}</strong></div><p className="note">{result.route_analysis.description}<br />{result.route_analysis.flow_summary}<br />{result.route_analysis.reasons.join(" · ")}</p></> : <p className="note">Legacy run: route analysis was not stored by this calculation version.</p>}</details>
+        <details open><summary>PRODUCTION QUALITY GATE</summary>{result.quality_gate ? <><div className="key-values"><span>Gate</span><strong>{result.quality_gate.standard}</strong><span>Status</span><strong>{result.quality_gate.status.toUpperCase()}</strong>{result.quality_gate.checks.flatMap((check) => [<span key={`${check.metric}-label`}>{pretty(check.metric)} · {check.requirement}</span>, <strong key={`${check.metric}-value`}>{check.measured === null ? "NOT TESTED" : `${check.measured} · ${check.status.toUpperCase()}`}</strong>])}</div><p className="note">{result.quality_gate.note}</p></> : <p className="note">This recipe is not being screened as an OPC 43 finished-cement candidate.</p>}</details>
+        <details><summary>UNCERTAINTY / PROCESS CORRECTIONS</summary><div className="key-values"><span>Chemistry scenario</span><strong>{pretty(result.chemistry_scenario)}</strong><span>LOI-derived raw-meal yield</span><strong>{result.derived_raw_meal_to_clinker_yield?.toFixed(4) ?? "N/A"}</strong><span>Grinding capacity factor</span><strong>{result.grinding_capacity_factor.toFixed(4)}</strong><span>Grinding energy factor</span><strong>{result.grinding_energy_factor.toFixed(4)}</strong><span>Fuel ash addition</span><strong>{result.fuel_ash_contribution_kg_t_clinker === null ? "N/A" : `${result.fuel_ash_contribution_kg_t_clinker.toFixed(2)} kg/t clinker`}</strong></div></details>
       </div>
 
       <details open><summary>MACHINE CAPACITY AND ENERGY BREAKDOWN</summary><div className="table-responsive"><table><thead><tr><th>Machine / immutable version</th><th>Stage</th><th>Actual stage t/h</th><th>Effective stage cap.</th><th>Cement-eq. cap.</th><th>Load</th><th>kWh/t cement</th><th>kcal/kg cement</th></tr></thead><tbody>{result.machine_metrics.map((item) => { const snapshot = result.machine_snapshots.find((machine) => machine.machine_id === item.machine_id); return <tr key={item.node_id}><td>{item.machine_name} · {item.machine_id} · v{snapshot?.version ?? "?"}</td><td>{pretty(item.process_stage)}</td><td>{item.actual_throughput_tph.toFixed(2)}</td><td>{item.effective_capacity_tph.toFixed(2)}</td><td>{item.cement_equivalent_capacity_tph?.toFixed(2) ?? "N/A"}</td><td>{item.load_percent.toFixed(1)}%</td><td>{item.electricity_kwh_t_cement.toFixed(2)}</td><td>{item.thermal_kcal_kg_cement.toFixed(2)}</td></tr>; })}</tbody></table></div></details>
@@ -305,18 +378,62 @@ function MachineGuide({ done }: { done: (machine: Machine) => void }) {
   const [stage, setStage] = useState("cement_grinding");
   const [capacity, setCapacity] = useState(100);
   const [minimum, setMinimum] = useState(40);
+  const [maximumStable, setMaximumStable] = useState(90);
   const [availability, setAvailability] = useState(0.9);
   const [energy, setEnergy] = useState(20);
   const [heat, setHeat] = useState(0);
   const [capex, setCapex] = useState(0);
   const [trl, setTrl] = useState(5);
+  const [designBlaine, setDesignBlaine] = useState("");
+  const [maxMoisture, setMaxMoisture] = useState("");
+  const [minimumTemperature, setMinimumTemperature] = useState("");
+  const [maximumTemperature, setMaximumTemperature] = useState("");
+  const [minimumOxygen, setMinimumOxygen] = useState("");
+  const [maximumOxygen, setMaximumOxygen] = useState("");
+  const [maximumFreeLime, setMaximumFreeLime] = useState("");
   const [source, setSource] = useState("Unverified machine input — replace with vendor source");
 
   async function save() {
-    const base = { machine_kind: kind, name, process_stage: stage, rated_capacity_tph: capacity, minimum_stable_tph: minimum, availability, specific_electricity_kwh_t: energy, specific_heat_kcal_kg: heat, capex_inr_crore: capex, technology_readiness_level: trl, evidence: [{ evidence_class: "unverified", source_title: source }] };
-    const payload = kind === "thermal" ? { ...base, maximum_temperature_c: stage === "clay_calcination" ? 850 : 1450, residence_time_minutes: 30, conversion_fraction: 0.95, product_state: stage === "clay_calcination" ? "calcined_clay" : "clinker" } : { ...base, input_material: "solid", output_material: "solid" };
+    const optional = (value: string) => value === "" ? null : Number(value);
+    const base = {
+      machine_kind: kind, name, process_stage: stage,
+      rated_capacity_tph: capacity, minimum_stable_tph: minimum,
+      maximum_stable_tph: maximumStable, availability,
+      specific_electricity_kwh_t: energy, specific_heat_kcal_kg: heat,
+      capex_inr_crore: capex, technology_readiness_level: trl,
+      design_blaine_m2_kg: optional(designBlaine),
+      maximum_feed_moisture_percent: optional(maxMoisture),
+      minimum_temperature_c: optional(minimumTemperature),
+      maximum_temperature_c: optional(maximumTemperature),
+      minimum_oxygen_percent: optional(minimumOxygen),
+      maximum_oxygen_percent: optional(maximumOxygen),
+      maximum_free_lime_percent: optional(maximumFreeLime),
+      evidence: [{ evidence_class: "unverified", source_title: source }],
+    };
+    const payload = kind === "thermal"
+      ? { ...base, residence_time_minutes: 30, conversion_fraction: 0.95, product_state: stage === "clay_calcination" ? "calcined_clay" : "clinker" }
+      : { ...base, input_material: "solid", output_material: "solid" };
     done(await req<Machine>("/api/machines", { method: "POST", body: JSON.stringify(payload) }));
   }
 
-  return <section className="guide"><h2>GUIDE / NEW MACHINE</h2><div className="form-grid two"><label>TYPE<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="standard">Standard</option><option value="thermal">Thermal transformation</option></select></label><label>NAME<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>STAGE<select value={stage} onChange={(event) => setStage(event.target.value)}><option value="crushing">Crushing</option><option value="raw_grinding">Raw grinding</option><option value="thermal_transformation">Clinker thermal transformation</option><option value="clay_calcination">Clay calcination</option><option value="cement_grinding">Cement grinding</option><option value="packing_dispatch">Packing</option></select></label><label>RATED CAPACITY T/H<input type="number" value={capacity} onChange={(event) => setCapacity(Number(event.target.value))} /></label><label>MINIMUM STABLE T/H<input type="number" value={minimum} onChange={(event) => setMinimum(Number(event.target.value))} /></label><label>AVAILABILITY 0–1<input type="number" min="0.01" max="1" step="0.01" value={availability} onChange={(event) => setAvailability(Number(event.target.value))} /></label><label>ELECTRICITY KWH/T STAGE<input type="number" value={energy} onChange={(event) => setEnergy(Number(event.target.value))} /></label><label>THERMAL KCAL/KG STAGE<input type="number" value={heat} onChange={(event) => setHeat(Number(event.target.value))} /></label><label>CAPEX ₹ CRORE<input type="number" value={capex} onChange={(event) => setCapex(Number(event.target.value))} /></label><label>TRL 1–9<input type="number" min="1" max="9" value={trl} onChange={(event) => setTrl(Number(event.target.value))} /></label></div><label>EVIDENCE / VENDOR SOURCE<input value={source} onChange={(event) => setSource(event.target.value)} /></label><pre>{trl >= 8 ? "PASS  Commercial maturity threshold" : "WARN  TRL below 8\nBLOCK Investor base case; R&D scenario only"}</pre><button className="run" disabled={minimum > capacity} onClick={() => void save()}>CREATE IMMUTABLE MACHINE VERSION</button></section>;
+  const isKiln = stage === "thermal_transformation" || stage === "clay_calcination";
+  const invalidEnvelope = minimum > maximumStable || maximumStable > capacity || (
+    minimumOxygen !== "" && maximumOxygen !== "" && Number(minimumOxygen) > Number(maximumOxygen)
+  );
+  return <section className="guide"><h2>GUIDE / NEW MACHINE</h2><div className="form-grid two">
+    <label>TYPE<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="standard">Standard</option><option value="thermal">Thermal transformation</option></select></label>
+    <label>NAME<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+    <label>STAGE<select value={stage} onChange={(event) => { const value = event.target.value; setStage(value); if (value === "cement_grinding" && designBlaine === "") setDesignBlaine("320"); }}><option value="crushing">Crushing</option><option value="raw_grinding">Raw grinding</option><option value="thermal_transformation">Clinker thermal transformation</option><option value="clay_calcination">Clay calcination</option><option value="cement_grinding">Cement grinding</option><option value="packing_dispatch">Packing</option></select></label>
+    <label>RATED CAPACITY T/H<input type="number" value={capacity} onChange={(event) => setCapacity(Number(event.target.value))} /></label>
+    <label>MINIMUM STABLE T/H<input type="number" value={minimum} onChange={(event) => setMinimum(Number(event.target.value))} /></label>
+    <label>MAXIMUM STABLE T/H<input type="number" value={maximumStable} onChange={(event) => setMaximumStable(Number(event.target.value))} /></label>
+    <label>AVAILABILITY 0–1<input type="number" min="0.01" max="1" step="0.01" value={availability} onChange={(event) => setAvailability(Number(event.target.value))} /></label>
+    <label>ELECTRICITY KWH/T STAGE<input type="number" value={energy} onChange={(event) => setEnergy(Number(event.target.value))} /></label>
+    <label>THERMAL KCAL/KG STAGE<input type="number" value={heat} onChange={(event) => setHeat(Number(event.target.value))} /></label>
+    <label>CAPEX ₹ CRORE<input type="number" value={capex} onChange={(event) => setCapex(Number(event.target.value))} /></label>
+    <label>TRL 1–9<input type="number" min="1" max="9" value={trl} onChange={(event) => setTrl(Number(event.target.value))} /></label>
+    <label>DESIGN BLAINE M²/KG<input type="number" value={designBlaine} onChange={(event) => setDesignBlaine(event.target.value)} placeholder="Grinding machines only" /></label>
+    <label>MAXIMUM FEED MOISTURE %<input type="number" value={maxMoisture} onChange={(event) => setMaxMoisture(event.target.value)} /></label>
+    {isKiln && <><label>MINIMUM TEMPERATURE °C<input type="number" value={minimumTemperature} onChange={(event) => setMinimumTemperature(event.target.value)} /></label><label>MAXIMUM TEMPERATURE °C<input type="number" value={maximumTemperature} onChange={(event) => setMaximumTemperature(event.target.value)} /></label><label>OXYGEN MINIMUM %<input type="number" value={minimumOxygen} onChange={(event) => setMinimumOxygen(event.target.value)} /></label><label>OXYGEN MAXIMUM %<input type="number" value={maximumOxygen} onChange={(event) => setMaximumOxygen(event.target.value)} /></label><label>MAXIMUM FREE LIME %<input type="number" value={maximumFreeLime} onChange={(event) => setMaximumFreeLime(event.target.value)} /></label></>}
+  </div><label>EVIDENCE / VENDOR SOURCE<input value={source} onChange={(event) => setSource(event.target.value)} /></label><pre>{invalidEnvelope ? "BLOCK Invalid operating envelope" : trl >= 8 ? "PASS  Commercial maturity threshold\nINFO  Stored operating limits are enforced during every run" : "WARN  TRL below 8\nBLOCK Investor base case; R&D scenario only"}</pre><button className="run" disabled={invalidEnvelope} onClick={() => void save()}>CREATE IMMUTABLE MACHINE VERSION</button></section>;
 }

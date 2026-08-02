@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from .blending import preview_blend
+from .blending import chemistry_for_scenario, preview_blend
 from .models import (
     AssumptionRecord,
     Blend,
     CarbonBreakdown,
+    Chemistry,
     CostBook,
     CostBreakdown,
     EnergyBreakdown,
@@ -21,10 +22,13 @@ from .models import (
     new_id,
     now,
 )
+from .optimisation import cement_moduli
+from .quality import opc43_gate
+from .routing import analyse_route
 from .storage import Repository
 
 
-CALCULATION_VERSION = "0.4.0"
+CALCULATION_VERSION = "0.5.0"
 
 
 def _unique_evidence(items: list[Evidence]) -> list[Evidence]:
@@ -54,7 +58,12 @@ class Engine:
                 raise ValueError("Unknown cost book")
             cost_book = stored_cost_book
 
-        preview = preview_blend(self.repo, blend, root_id=blend.blend_id)
+        preview = preview_blend(
+            self.repo,
+            blend,
+            root_id=blend.blend_id,
+            chemistry_scenario=request.chemistry_scenario,
+        )
         materials: dict[str, Material] = {}
         for component in preview.flattened_components:
             value = self.repo.get("materials", component.material_id)
@@ -119,19 +128,11 @@ class Engine:
             )
 
         chemistry = preview.chemistry
-        lsf = None
-        sm = None
-        am = None
+        lsf: float | None = None
+        sm: float | None = None
+        am: float | None = None
         if blend.blend_class == "raw_meal":
-            lsf_denominator = (
-                2.8 * chemistry.sio2
-                + 1.18 * chemistry.al2o3
-                + 0.65 * chemistry.fe2o3
-            )
-            lsf = chemistry.cao / lsf_denominator * 100 if lsf_denominator else None
-            sm_denominator = chemistry.al2o3 + chemistry.fe2o3
-            sm = chemistry.sio2 / sm_denominator if sm_denominator else None
-            am = chemistry.al2o3 / chemistry.fe2o3 if chemistry.fe2o3 else None
+            lsf, sm, am = cement_moduli(chemistry)
             log(
                 "CALC",
                 "RAW_MEAL",
@@ -149,6 +150,28 @@ class Engine:
             )
             log("CHECK", "CHEMISTRY", f"Weighted {blend.blend_class.replace('_', ' ')} chemistry calculated")
 
+        derived_yield: float | None = None
+        effective_yield = request.raw_meal_to_clinker_yield
+        if request.auto_mass_conversion and blend.blend_class == "raw_meal":
+            if chemistry.loi is None:
+                validate(
+                    "warning",
+                    "MASS_CONVERSION_UNKNOWN",
+                    "Automatic raw-meal-to-clinker conversion requested, but LOI is unknown; the manual yield is retained",
+                )
+            else:
+                moisture = request.kiln_feed_moisture_percent or 0.0
+                derived_yield = max(
+                    0.0,
+                    min(1.0, (1.0 - chemistry.loi / 100.0) * (1.0 - moisture / 100.0)),
+                )
+                effective_yield = derived_yield
+                log(
+                    "CALC",
+                    "MASS_CONVERSION",
+                    f"LOI/moisture-derived raw-meal-to-clinker yield={derived_yield:.4f}",
+                )
+
         for warning in preview.warnings:
             code = "DATA_GAP" if "no " in warning.lower() or "unreported" in warning.lower() else "VALIDATION"
             validate("warning", code, warning)
@@ -157,6 +180,38 @@ class Engine:
             "PHYSICAL_VALIDATION",
             "No laboratory or plant performance validation is attached to this run",
         )
+        route_analysis = analyse_route(
+            self.repo,
+            blend,
+            route,
+            request.target_output_tph,
+            effective_yield,
+        )
+        log("INFO", "ROUTE", route_analysis.description)
+        log("FLOW", "ROUTE", route_analysis.flow_summary)
+        if not route_analysis.compatible:
+            validate(
+                "block",
+                "ROUTE_COMPATIBILITY",
+                "Selected route is incomplete for this blend: "
+                + (", ".join(route_analysis.missing_stages) or "no usable capacity"),
+            )
+
+        is_opc43_candidate = (
+            blend.blend_class == "finished_cement"
+            and (
+                blend.family.upper().startswith("OPC")
+                or "OPC" in (blend.applicable_standard or "").upper()
+            )
+        )
+        quality_gate = opc43_gate(request.quality_measurements) if is_opc43_candidate else None
+        if quality_gate is not None:
+            if quality_gate.status == "fail":
+                validate("block", "OPC43_GATE", "One or more measured OPC 43 quality requirements failed")
+            elif quality_gate.status == "review":
+                validate("warning", "OPC43_GATE", "OPC 43 production gate is incomplete; attach all required laboratory results")
+            else:
+                validate("info", "OPC43_GATE", "All supplied OPC 43 laboratory gate values pass")
 
         fractions_by_type: dict[str, float] = {}
         for component in preview.flattened_components:
@@ -167,13 +222,102 @@ class Engine:
         clinker_fraction = fractions_by_type.get("clinker", 0.0)
         calcined_clay_fraction = fractions_by_type.get("calcined_clay", 0.0)
 
+        fuel_ash_contribution: float | None = None
+        fuel_ash_adjusted_chemistry: Chemistry | None = None
+        fuel_material: Material | None = None
+        if request.fuel_material_id:
+            stored_fuel = self.repo.get("materials", request.fuel_material_id)
+            if not isinstance(stored_fuel, Material):
+                raise ValueError("Unknown fuel material")
+            fuel_material = stored_fuel
+            if request.fuel_rate_kg_t_clinker is None or stored_fuel.fuel_ash_percent is None:
+                validate(
+                    "warning",
+                    "FUEL_ASH_UNKNOWN",
+                    "Fuel ash contribution needs both fuel rate and ash percentage",
+                )
+            elif stored_fuel.fuel_ash_chemistry is None:
+                validate(
+                    "warning",
+                    "FUEL_ASH_CHEMISTRY_UNKNOWN",
+                    "Fuel ash mass is known but its oxide chemistry is missing",
+                )
+            elif blend.blend_class != "raw_meal":
+                validate(
+                    "info",
+                    "FUEL_ASH_SCOPE",
+                    "Fuel ash chemistry is only merged into raw-meal kiln calculations",
+                )
+            else:
+                fuel_ash_contribution = (
+                    request.fuel_rate_kg_t_clinker * stored_fuel.fuel_ash_percent / 100.0
+                )
+                ash_fraction = fuel_ash_contribution / 1000.0
+                adjusted: dict[str, float | None] = {}
+                for oxide in Chemistry.model_fields:
+                    raw_value = getattr(chemistry, oxide)
+                    ash_value = getattr(stored_fuel.fuel_ash_chemistry, oxide)
+                    if raw_value is None or ash_value is None:
+                        adjusted[oxide] = None
+                    elif oxide == "loi":
+                        adjusted[oxide] = 0.0
+                    else:
+                        nonvolatile = raw_value / max(effective_yield, 1e-9)
+                        adjusted[oxide] = (nonvolatile + ash_value * ash_fraction) / (1.0 + ash_fraction)
+                fuel_ash_adjusted_chemistry = Chemistry(**adjusted)
+                log(
+                    "CALC",
+                    "FUEL_ASH",
+                    f"Fuel ash adds {fuel_ash_contribution:.2f} kg/t clinker to the kiln mineral input",
+                )
+
+        weighted_grindability = 0.0
+        grindability_complete = True
+        for component in preview.flattened_components:
+            material = materials[component.material_id]
+            if material.grindability_factor is None:
+                grindability_complete = False
+                weighted_grindability += component.percentage / 100.0
+            else:
+                weighted_grindability += material.grindability_factor * component.percentage / 100.0
+        target_blaine = request.target_blaine_m2_kg
+        grinding_capacity_factor = 1.0
+        grinding_energy_factor = 1.0
+        design_blaines = [
+            machine.design_blaine_m2_kg
+            for _, machine in machines
+            if machine.process_stage == "cement_grinding" and machine.design_blaine_m2_kg is not None
+        ]
+        if target_blaine is not None and design_blaines:
+            design_blaine = sum(design_blaines) / len(design_blaines)
+            fineness_ratio = max(target_blaine / design_blaine, 0.1)
+            grinding_capacity_factor = max(0.35, min(1.5, fineness_ratio ** -0.55 / weighted_grindability))
+            grinding_energy_factor = max(0.5, min(2.5, fineness_ratio ** 0.65 * weighted_grindability))
+            log(
+                "CALC",
+                "GRINDING",
+                f"Blaine/grindability capacity factor={grinding_capacity_factor:.3f} energy factor={grinding_energy_factor:.3f}",
+            )
+            if not grindability_complete:
+                validate(
+                    "warning",
+                    "GRINDABILITY_ASSUMED",
+                    "One or more material grindability factors are unknown; 1.0 was used for those components",
+                )
+
         def stage_factor(machine: Machine) -> float:
             if blend.blend_class != "finished_cement":
-                return 1.0
+                active_stages = {
+                    "raw_material_stockpile": {"crushing"},
+                    "raw_meal": {"crushing", "raw_grinding"},
+                    "clinker_blend": {"thermal_transformation"},
+                    "premix": {"cement_grinding"},
+                }.get(blend.blend_class, set())
+                return 1.0 if machine.process_stage in active_stages else 0.0
             if not has_upstream_clinker_process and not produces_calcined_clay:
                 return 1.0
             if machine.process_stage in {"crushing", "raw_grinding"}:
-                return clinker_fraction / request.raw_meal_to_clinker_yield
+                return clinker_fraction / effective_yield
             if machine.process_stage == "thermal_transformation":
                 return clinker_fraction
             if machine.process_stage == "clay_calcination":
@@ -185,6 +329,10 @@ class Engine:
         for node_id, machine in machines:
             factor = stage_factor(machine)
             effective_capacity = machine.rated_capacity_tph * machine.availability
+            if machine.maximum_stable_tph is not None:
+                effective_capacity = min(effective_capacity, machine.maximum_stable_tph)
+            if machine.process_stage == "cement_grinding":
+                effective_capacity *= grinding_capacity_factor
             cement_capacity = effective_capacity / factor if factor > 0 else None
             if cement_capacity is not None:
                 capacity_candidates.append((cement_capacity, node_id, machine))
@@ -204,7 +352,8 @@ class Engine:
         for node_id, machine, factor, effective_capacity, cement_capacity in machine_factors:
             actual_throughput = output * factor
             load_percent = actual_throughput / effective_capacity * 100 if effective_capacity else 0
-            electricity_contribution = machine.specific_electricity_kwh_t * factor
+            stage_energy_factor = grinding_energy_factor if machine.process_stage == "cement_grinding" else 1.0
+            electricity_contribution = machine.specific_electricity_kwh_t * factor * stage_energy_factor
             thermal_contribution = machine.specific_heat_kcal_kg * factor
             electricity += electricity_contribution
             thermal += thermal_contribution
@@ -240,6 +389,43 @@ class Engine:
                     "LOW_TRL",
                     f"{machine.name} is TRL {machine.technology_readiness_level}; exclude it from an investor base case",
                 )
+            if machine.process_stage == "thermal_transformation":
+                if (
+                    machine.maximum_feed_moisture_percent is not None
+                    and request.kiln_feed_moisture_percent is not None
+                    and request.kiln_feed_moisture_percent > machine.maximum_feed_moisture_percent
+                ):
+                    validate("block", "KILN_MOISTURE_ENVELOPE", f"Kiln feed moisture exceeds {machine.name}'s stored limit")
+                if (
+                    machine.minimum_temperature_c is not None
+                    and request.kiln_temperature_c is not None
+                    and request.kiln_temperature_c < machine.minimum_temperature_c
+                ):
+                    validate("block", "KILN_TEMPERATURE_ENVELOPE", f"Kiln temperature is below {machine.name}'s stored minimum")
+                if (
+                    machine.maximum_temperature_c is not None
+                    and request.kiln_temperature_c is not None
+                    and request.kiln_temperature_c > machine.maximum_temperature_c
+                ):
+                    validate("block", "KILN_TEMPERATURE_ENVELOPE", f"Kiln temperature exceeds {machine.name}'s stored maximum")
+                if (
+                    machine.minimum_oxygen_percent is not None
+                    and request.kiln_oxygen_percent is not None
+                    and request.kiln_oxygen_percent < machine.minimum_oxygen_percent
+                ):
+                    validate("block", "KILN_OXYGEN_ENVELOPE", f"Kiln oxygen is below {machine.name}'s stored minimum")
+                if (
+                    machine.maximum_oxygen_percent is not None
+                    and request.kiln_oxygen_percent is not None
+                    and request.kiln_oxygen_percent > machine.maximum_oxygen_percent
+                ):
+                    validate("block", "KILN_OXYGEN_ENVELOPE", f"Kiln oxygen exceeds {machine.name}'s stored maximum")
+                if (
+                    machine.maximum_free_lime_percent is not None
+                    and request.clinker_free_lime_percent is not None
+                    and request.clinker_free_lime_percent > machine.maximum_free_lime_percent
+                ):
+                    validate("block", "FREE_LIME_GATE", f"Measured clinker free lime exceeds {machine.name}'s stored limit")
 
         if request.target_output_tph > bottleneck:
             validate(
@@ -394,10 +580,33 @@ class Engine:
             assumptions.append(
                 AssumptionRecord(
                     key="raw_meal_to_clinker_yield",
-                    value=f"{request.raw_meal_to_clinker_yield:.3f}",
-                    basis="Run input used to convert upstream equipment capacity to cement-equivalent capacity",
+                    value=f"{effective_yield:.3f}",
+                    basis=(
+                        "Derived from raw-meal LOI and entered moisture"
+                        if derived_yield is not None
+                        else "Run input used to convert upstream equipment capacity to cement-equivalent capacity"
+                    ),
                 )
             )
+        assumptions.extend(
+            [
+                AssumptionRecord(
+                    key="chemistry_scenario",
+                    value=request.chemistry_scenario,
+                    basis="Material minimum/typical/maximum chemistry selection",
+                ),
+                AssumptionRecord(
+                    key="grinding_capacity_factor",
+                    value=f"{grinding_capacity_factor:.4f}",
+                    basis="Stored material grindability and target/design Blaine correction",
+                ),
+                AssumptionRecord(
+                    key="grinding_energy_factor",
+                    value=f"{grinding_energy_factor:.4f}",
+                    basis="Stored material grindability and target/design Blaine correction",
+                ),
+            ]
+        )
 
         evidence = list(blend.evidence)
         for material in materials.values():
@@ -406,6 +615,8 @@ class Engine:
             evidence.extend(machine.evidence)
         if cost_book:
             evidence.extend(cost_book.evidence)
+        if fuel_material:
+            evidence.extend(fuel_material.evidence)
 
         warnings = [item.message for item in validation if item.severity in {"warning", "block"}]
         information = [item.message for item in validation if item.severity == "info"]
@@ -423,6 +634,14 @@ class Engine:
             material_snapshots=list(materials.values()),
             machine_snapshots=[machine for _, machine in machines],
             chemistry=chemistry,
+            chemistry_scenario=request.chemistry_scenario,
+            route_analysis=route_analysis,
+            quality_gate=quality_gate,
+            derived_raw_meal_to_clinker_yield=derived_yield,
+            fuel_ash_contribution_kg_t_clinker=fuel_ash_contribution,
+            fuel_ash_adjusted_chemistry=fuel_ash_adjusted_chemistry,
+            grinding_capacity_factor=grinding_capacity_factor,
+            grinding_energy_factor=grinding_energy_factor,
             lsf=lsf,
             silica_modulus=sm,
             alumina_modulus=am,

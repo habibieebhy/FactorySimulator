@@ -81,9 +81,9 @@ def seed(repo: Repository) -> None:
                 al2o3=0.75,
                 fe2o3=0.71,
                 mgo=0.67,
-                so3=0,
-                na2o=0,
-                k2o=0,
+                so3=None,
+                na2o=None,
+                k2o=None,
                 loi=41.72,
             ),
             cost_inr_per_t=None,
@@ -106,10 +106,26 @@ def seed(repo: Repository) -> None:
                 al2o3=1.22,
                 fe2o3=1.27,
                 mgo=1.41,
-                so3=0,
-                na2o=0,
-                k2o=0,
+                so3=None,
+                na2o=None,
+                k2o=None,
                 loi=40.88,
+            ),
+            chemistry_min=Chemistry(
+                cao=46.45,
+                sio2=2.05,
+                al2o3=0.74,
+                fe2o3=1.03,
+                mgo=1.34,
+                loi=37.65,
+            ),
+            chemistry_max=Chemistry(
+                cao=51.75,
+                sio2=8.82,
+                al2o3=1.69,
+                fe2o3=2.19,
+                mgo=1.67,
+                loi=41.77,
             ),
             cost_inr_per_t=None,
             co2_kg_per_t=None,
@@ -131,9 +147,9 @@ def seed(repo: Repository) -> None:
                 al2o3=0.74,
                 fe2o3=1.03,
                 mgo=1.34,
-                so3=0,
-                na2o=0,
-                k2o=0,
+                so3=None,
+                na2o=None,
+                k2o=None,
                 loi=41.77,
             ),
             cost_inr_per_t=None,
@@ -156,9 +172,9 @@ def seed(repo: Repository) -> None:
                 al2o3=1.69,
                 fe2o3=2.19,
                 mgo=1.67,
-                so3=0,
-                na2o=0,
-                k2o=0,
+                so3=None,
+                na2o=None,
+                k2o=None,
                 loi=37.65,
             ),
             cost_inr_per_t=None,
@@ -181,8 +197,6 @@ def seed(repo: Repository) -> None:
                 fe2o3=3.3,
                 mgo=1.5,
                 so3=0.8,
-                na2o=0.0,
-                k2o=0.0,
                 loi=0.5,
             ),
             cost_inr_per_t=4200,
@@ -204,8 +218,6 @@ def seed(repo: Repository) -> None:
                 fe2o3=7,
                 mgo=1.5,
                 so3=0.5,
-                na2o=0.0,
-                k2o=0.0,
                 loi=3,
             ),
             cost_inr_per_t=1100,
@@ -227,8 +239,6 @@ def seed(repo: Repository) -> None:
                 fe2o3=0.3,
                 mgo=0.4,
                 so3=44,
-                na2o=0.0,
-                k2o=0.0,
                 loi=20,
             ),
             cost_inr_per_t=1800,
@@ -250,8 +260,6 @@ def seed(repo: Repository) -> None:
                 fe2o3=3,
                 mgo=0.5,
                 so3=0.2,
-                na2o=0.0,
-                k2o=0.0,
                 loi=2.5,
             ),
             cost_inr_per_t=2300,
@@ -273,8 +281,6 @@ def seed(repo: Repository) -> None:
                 fe2o3=0.7,
                 mgo=8,
                 so3=1,
-                na2o=0.0,
-                k2o=0.0,
                 loi=1,
             ),
             cost_inr_per_t=1700,
@@ -291,7 +297,7 @@ def seed(repo: Repository) -> None:
             location="East Jaintia Hills, Meghalaya",
             processing_state="ground_research_proxy",
             applicable_blend_classes=["finished_cement", "premix"],
-            chemistry=Chemistry(cao=52.28, sio2=2.47, al2o3=0.75, fe2o3=0.71, mgo=0.67, so3=0, na2o=0, k2o=0, loi=41.72),
+            chemistry=Chemistry(cao=52.28, sio2=2.47, al2o3=0.75, fe2o3=0.71, mgo=0.67, so3=None, na2o=None, k2o=None, loi=41.72),
             cost_inr_per_t=None,
             co2_kg_per_t=None,
             notes="Oxides copied from evidenced quarry chemistry; fineness, grindability, cost and finished-cement performance are not validated.",
@@ -306,7 +312,7 @@ def seed(repo: Repository) -> None:
             location="Lumshnong, East Jaintia Hills, Meghalaya",
             processing_state="ground_research_proxy",
             applicable_blend_classes=["finished_cement", "premix"],
-            chemistry=Chemistry(cao=50.51, sio2=3.55, al2o3=1.22, fe2o3=1.27, mgo=1.41, so3=0, na2o=0, k2o=0, loi=40.88),
+            chemistry=Chemistry(cao=50.51, sio2=3.55, al2o3=1.22, fe2o3=1.27, mgo=1.41, so3=None, na2o=None, k2o=None, loi=40.88),
             cost_inr_per_t=None,
             co2_kg_per_t=None,
             notes="Oxides copied from reserve-weighted quarry chemistry; fineness, grindability, cost and finished-cement performance are not validated.",
@@ -523,6 +529,13 @@ def seed(repo: Repository) -> None:
             specific_heat_kcal_kg=heat,
             capex_inr_crore=0,
             technology_readiness_level=9,
+            maximum_stable_tph=capacity * (0.9 if heat else 0.93),
+            design_blaine_m2_kg=320 if stage == "cement_grinding" else None,
+            maximum_feed_moisture_percent=1.5 if stage == "thermal_transformation" else None,
+            minimum_temperature_c=1350 if stage == "thermal_transformation" else None,
+            minimum_oxygen_percent=1.0 if stage == "thermal_transformation" else None,
+            maximum_oxygen_percent=4.0 if stage == "thermal_transformation" else None,
+            maximum_free_lime_percent=2.0 if stage == "thermal_transformation" else None,
             maximum_temperature_c=1450 if heat else None,
             residence_time_minutes=35 if heat else None,
             conversion_fraction=0.98 if heat else None,
@@ -657,3 +670,54 @@ def seed(repo: Repository) -> None:
     )
     for route in [integrated_route, grinding_route, lc3_route]:
         _save_missing(repo, "routes", route, route.route_id)
+
+    # V0.5 corrects legacy seed semantics without touching user-created IDs.
+    # Historical runs remain immutable because they already contain snapshots.
+    seed_materials = {item.material_id: item for item in materials}
+    for material_id in seed_materials:
+        existing = repo.get("materials", material_id)
+        reference = seed_materials[material_id]
+        if isinstance(existing, Material):
+            repo.save(
+                "materials",
+                existing.model_copy(
+                    update={
+                        "functional_role": reference.functional_role,
+                        "chemistry": reference.chemistry,
+                        "chemistry_min": reference.chemistry_min,
+                        "chemistry_max": reference.chemistry_max,
+                        "moisture_percent": reference.moisture_percent,
+                        "grindability_factor": reference.grindability_factor,
+                        "fuel_ash_percent": reference.fuel_ash_percent,
+                        "fuel_calorific_value_kcal_kg": reference.fuel_calorific_value_kcal_kg,
+                        "fuel_ash_chemistry": reference.fuel_ash_chemistry,
+                        "data_gaps": reference.data_gaps,
+                    }
+                ),
+            )
+
+    seed_machines = {item.machine_id: item for item in machines}
+    for machine_id in {
+        "machine_crusher",
+        "machine_raw_mill",
+        "machine_rotary_kiln",
+        "machine_cement_mill",
+        "machine_packer",
+    }:
+        existing = repo.get("machines", machine_id)
+        reference = seed_machines[machine_id]
+        if isinstance(existing, Machine):
+            repo.save(
+                "machines",
+                existing.model_copy(
+                    update={
+                        "maximum_stable_tph": reference.maximum_stable_tph,
+                        "design_blaine_m2_kg": reference.design_blaine_m2_kg,
+                        "maximum_feed_moisture_percent": reference.maximum_feed_moisture_percent,
+                        "minimum_temperature_c": reference.minimum_temperature_c,
+                        "minimum_oxygen_percent": reference.minimum_oxygen_percent,
+                        "maximum_oxygen_percent": reference.maximum_oxygen_percent,
+                        "maximum_free_lime_percent": reference.maximum_free_lime_percent,
+                    }
+                ),
+            )

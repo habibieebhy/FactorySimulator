@@ -44,6 +44,20 @@ const materialTypes = [
   "biomass",
   "rdf",
   "alternative_fuel",
+  "custom",
+];
+
+const functionalRoles = [
+  "raw_kiln_feed",
+  "corrective",
+  "clinker",
+  "cement_addition",
+  "set_regulator",
+  "process_additive",
+  "fuel",
+  "alternative_fuel",
+  "fuel_ash",
+  "recycled_process_material",
 ];
 
 type DraftPart = {
@@ -61,7 +75,19 @@ function pretty(value: string): string {
   return value.replaceAll("_", " ").replace(/\b\w/g, (match) => match.toUpperCase());
 }
 
-function defaultMaterialClasses(materialType: string): string[] {
+function defaultMaterialClasses(materialType: string, functionalRole: string): string[] {
+  if (["fuel", "alternative_fuel", "fuel_ash"].includes(functionalRole)) {
+    return ["fuel_blend", "premix"];
+  }
+  if (["raw_kiln_feed", "corrective", "recycled_process_material"].includes(functionalRole)) {
+    return ["raw_material_stockpile", "raw_meal", "premix"];
+  }
+  if (functionalRole === "clinker") {
+    return ["clinker_blend", "finished_cement", "premix"];
+  }
+  if (["cement_addition", "set_regulator", "process_additive"].includes(functionalRole)) {
+    return ["finished_cement", "premix"];
+  }
   if (["coal", "petcoke", "biomass", "rdf", "alternative_fuel"].includes(materialType)) {
     return ["fuel_blend", "premix"];
   }
@@ -72,6 +98,21 @@ function defaultMaterialClasses(materialType: string): string[] {
     return ["raw_material_stockpile", "raw_meal", "premix"];
   }
   return ["finished_cement", "premix"];
+}
+
+function defaultFunctionalRole(materialType: string): string {
+  if (materialType === "clinker") return "clinker";
+  if (materialType === "gypsum") return "set_regulator";
+  if (["coal", "petcoke"].includes(materialType)) return "fuel";
+  if (["biomass", "rdf", "alternative_fuel"].includes(materialType)) return "alternative_fuel";
+  if (["silica_corrective", "iron_corrective", "bauxite", "laterite", "sand"].includes(materialType)) return "corrective";
+  if (["limestone", "clay", "shale"].includes(materialType)) return "raw_kiln_feed";
+  if (materialType === "grinding_aid") return "process_additive";
+  return "cement_addition";
+}
+
+function formatChemistry(value: number | null): string {
+  return value === null ? "N/A" : `${value.toFixed(3)}%`;
 }
 
 export function BlendWorkspace({
@@ -357,7 +398,7 @@ function BlendComposer({
             <div className="section-heading"><span>SCREENING CALCULATION</span><span>NOT PHYSICAL VALIDATION</span></div>
             <div className="chemistry-grid">
               {Object.entries(preview.chemistry).map(([oxide, value]) => (
-                <div key={oxide}><small>{oxide.toUpperCase()}</small><strong>{value.toFixed(3)}%</strong></div>
+                <div key={oxide}><small>{oxide.toUpperCase()}</small><strong>{formatChemistry(value)}</strong></div>
               ))}
               <div><small>MATERIAL COST</small><strong>{preview.material_cost_inr_t === null ? "N/A" : `₹${preview.material_cost_inr_t.toFixed(0)}/t`}</strong></div>
               <div><small>MATERIAL CO₂</small><strong>{preview.estimated_co2_kg_t === null ? "N/A" : `${preview.estimated_co2_kg_t.toFixed(0)} kg/t`}</strong></div>
@@ -375,15 +416,30 @@ function BlendComposer({
   );
 }
 
+const emptyChemistry: Chemistry = { cao: null, sio2: null, al2o3: null, fe2o3: null, mgo: null, so3: null, na2o: null, k2o: null, loi: null };
+
+function ChemistryInputs({ title, value, setValue }: { title: string; value: Chemistry; setValue: (value: Chemistry) => void }) {
+  return <><div className="section-heading"><span>{title}</span><span>BLANK = UNKNOWN · 0 = MEASURED ZERO</span></div><div className="oxide-inputs">{(Object.keys(value) as (keyof Chemistry)[]).map((oxide) => <label key={oxide}>{oxide.toUpperCase()}<input type="number" min="0" max="100" step="0.001" value={value[oxide] ?? ""} onChange={(event) => setValue({ ...value, [oxide]: event.target.value === "" ? null : Number(event.target.value) })} /></label>)}</div></>;
+}
+
 function MaterialEditor({ done }: { done: (material: Material) => void }) {
-  const emptyChemistry: Chemistry = { cao: 0, sio2: 0, al2o3: 0, fe2o3: 0, mgo: 0, so3: 0, na2o: 0, k2o: 0, loi: 0 };
   const [name, setName] = useState("New Evidence-Backed Material");
   const [materialType, setMaterialType] = useState("limestone");
+  const [functionalRole, setFunctionalRole] = useState("raw_kiln_feed");
+  const [customSubtype, setCustomSubtype] = useState("");
   const [location, setLocation] = useState("Meghalaya");
   const [processingState, setProcessingState] = useState("as_received");
   const [cost, setCost] = useState("");
   const [co2, setCo2] = useState("");
-  const [chemistry, setChemistry] = useState<Chemistry>(emptyChemistry);
+  const [moisture, setMoisture] = useState("");
+  const [grindability, setGrindability] = useState("");
+  const [fuelAsh, setFuelAsh] = useState("");
+  const [fuelCv, setFuelCv] = useState("");
+  const [chemistry, setChemistry] = useState<Chemistry>({ ...emptyChemistry });
+  const [chemistryMin, setChemistryMin] = useState<Chemistry>({ ...emptyChemistry });
+  const [chemistryMax, setChemistryMax] = useState<Chemistry>({ ...emptyChemistry });
+  const [fuelAshChemistry, setFuelAshChemistry] = useState<Chemistry>({ ...emptyChemistry });
+  const [hasRange, setHasRange] = useState(false);
   const [evidenceClass, setEvidenceClass] = useState("measured");
   const [sourceTitle, setSourceTitle] = useState("Laboratory or source record — replace this title");
   const [sourceUri, setSourceUri] = useState("");
@@ -391,6 +447,7 @@ function MaterialEditor({ done }: { done: (material: Material) => void }) {
   const [notes, setNotes] = useState("");
   const [dataGaps, setDataGaps] = useState("");
   const [error, setError] = useState("");
+  const fuelRole = functionalRole === "fuel" || functionalRole === "alternative_fuel";
 
   async function save() {
     setError("");
@@ -398,58 +455,47 @@ function MaterialEditor({ done }: { done: (material: Material) => void }) {
       const saved = await req<Material>("/api/materials", {
         method: "POST",
         body: JSON.stringify({
-          name,
-          material_type: materialType,
-          location: location || null,
-          processing_state: processingState,
-          applicable_blend_classes: defaultMaterialClasses(materialType),
-          chemistry,
-          cost_inr_per_t: cost.trim() === "" ? null : Number(cost),
-          co2_kg_per_t: co2.trim() === "" ? null : Number(co2),
-          notes: notes || null,
-          data_gaps: dataGaps.split(",").map((item) => item.trim()).filter(Boolean),
+          name, material_type: materialType === "custom" ? "custom" : materialType,
+          functional_role: functionalRole, custom_subtype: customSubtype || null,
+          location: location || null, processing_state: processingState,
+          applicable_blend_classes: defaultMaterialClasses(materialType, functionalRole), chemistry,
+          chemistry_min: hasRange ? chemistryMin : null, chemistry_max: hasRange ? chemistryMax : null,
+          moisture_percent: moisture === "" ? null : Number(moisture),
+          grindability_factor: grindability === "" ? null : Number(grindability),
+          fuel_ash_percent: fuelAsh === "" ? null : Number(fuelAsh),
+          fuel_calorific_value_kcal_kg: fuelCv === "" ? null : Number(fuelCv),
+          fuel_ash_chemistry: fuelRole && fuelAsh !== "" ? fuelAshChemistry : null,
+          cost_inr_per_t: cost === "" ? null : Number(cost), co2_kg_per_t: co2 === "" ? null : Number(co2),
+          notes: notes || null, data_gaps: dataGaps.split(",").map((item) => item.trim()).filter(Boolean),
           evidence: [{ evidence_class: evidenceClass, source_title: sourceTitle, source_uri: sourceUri || null, page: page || null, note: notes || null }],
         }),
       });
       done(saved);
-    } catch (caught) {
-      setError(String(caught));
-    }
+    } catch (caught) { setError(String(caught)); }
   }
 
-  return (
-    <div className="composer">
-      <h2>GUIDE / NEW MATERIAL RECORD</h2>
-      <div className="form-grid two">
-        <label>NAME<input value={name} onChange={(event) => setName(event.target.value)} /></label>
-        <label>MATERIAL TYPE<select value={materialType} onChange={(event) => setMaterialType(event.target.value)}>{materialTypes.map((type) => <option key={type} value={type}>{pretty(type)}</option>)}</select></label>
-        <label>LOCATION / SOURCE<input value={location} onChange={(event) => setLocation(event.target.value)} /></label>
-        <label>PROCESSING STATE<input value={processingState} onChange={(event) => setProcessingState(event.target.value)} placeholder="as_received, dried, ground…" /></label>
-        <label>DELIVERED COST ₹/T — LEAVE BLANK IF UNKNOWN<input type="number" min="0" step="0.01" value={cost} onChange={(event) => setCost(event.target.value)} /></label>
-        <label>MATERIAL CO₂ KG/T — LEAVE BLANK IF UNKNOWN<input type="number" min="0" step="0.01" value={co2} onChange={(event) => setCo2(event.target.value)} /></label>
-      </div>
-      <div className="section-heading"><span>CHEMISTRY / MASS %</span><span>ENTER MEASURED OR SOURCED VALUES</span></div>
-      <div className="oxide-inputs">
-        {(Object.keys(chemistry) as (keyof Chemistry)[]).map((oxide) => (
-          <label key={oxide}>{oxide.toUpperCase()}<input type="number" min="0" max="100" step="0.001" value={chemistry[oxide]} onChange={(event) => setChemistry((current) => ({ ...current, [oxide]: Number(event.target.value) }))} /></label>
-        ))}
-      </div>
-      <div className="section-heading"><span>EVIDENCE</span><span>PROVENANCE TRAVELS WITH THE MATERIAL</span></div>
-      <div className="form-grid two">
-        <label>EVIDENCE CLASS<select value={evidenceClass} onChange={(event) => setEvidenceClass(event.target.value)}><option value="measured">Measured</option><option value="official_project_document">Official project document</option><option value="vendor_data">Vendor data</option><option value="literature">Literature</option><option value="inferred">Inferred</option><option value="assumed">Assumed</option></select></label>
-        <label>SOURCE TITLE<input value={sourceTitle} onChange={(event) => setSourceTitle(event.target.value)} /></label>
-        <label>SOURCE URI<input value={sourceUri} onChange={(event) => setSourceUri(event.target.value)} /></label>
-        <label>PAGE / TABLE<input value={page} onChange={(event) => setPage(event.target.value)} /></label>
-      </div>
-      <label>NOTES<input value={notes} onChange={(event) => setNotes(event.target.value)} /></label>
-      <label>UNREPORTED / UNKNOWN FIELDS — COMMA SEPARATED<input value={dataGaps} onChange={(event) => setDataGaps(event.target.value)} placeholder="Na2O, K2O, moisture, grindability" /></label>
-      <pre className="validation-log">
-        INFO  Compatible classes = {defaultMaterialClasses(materialType).map(pretty).join(", ")}{"\n"}
-        {evidenceClass === "measured" ? "PASS  Marked as measured; retain the laboratory record" : "WARN  Not a measured plant/laboratory value"}{"\n"}
-        INFO  Blank cost or CO₂ remains unknown and makes the corresponding run result N/A
-      </pre>
-      {error && <div className="err">{error}</div>}
-      <button className="run primary-action" disabled={!name.trim() || !sourceTitle.trim()} onClick={() => void save()}>CREATE VERSIONED MATERIAL</button>
+  return <div className="composer"><h2>GUIDE / NEW MATERIAL RECORD</h2>
+    <div className="form-grid two">
+      <label>NAME<input value={name} onChange={(event) => setName(event.target.value)} /></label>
+      <label>FUNCTIONAL ROLE<select value={functionalRole} onChange={(event) => setFunctionalRole(event.target.value)}>{functionalRoles.map((role) => <option key={role} value={role}>{pretty(role)}</option>)}</select></label>
+      <label>CONTROLLED TYPE<select value={materialType} onChange={(event) => { const type = event.target.value; setMaterialType(type); setFunctionalRole(defaultFunctionalRole(type)); }}>{materialTypes.map((type) => <option key={type} value={type}>{pretty(type)}</option>)}</select></label>
+      <label>CUSTOM SUBTYPE / TRADE NAME<input value={customSubtype} onChange={(event) => setCustomSubtype(event.target.value)} placeholder="Required context for custom materials" /></label>
+      <label>LOCATION / SOURCE<input value={location} onChange={(event) => setLocation(event.target.value)} /></label>
+      <label>PROCESSING STATE<input value={processingState} onChange={(event) => setProcessingState(event.target.value)} /></label>
+      <label>DELIVERED COST ₹/T<input type="number" min="0" value={cost} onChange={(event) => setCost(event.target.value)} /></label>
+      <label>MATERIAL CO₂ KG/T<input type="number" min="0" value={co2} onChange={(event) => setCo2(event.target.value)} /></label>
+      <label>MOISTURE %<input type="number" min="0" max="100" value={moisture} onChange={(event) => setMoisture(event.target.value)} /></label>
+      <label>GRINDABILITY FACTOR (1 = BASELINE)<input type="number" min="0.01" step="0.01" value={grindability} onChange={(event) => setGrindability(event.target.value)} /></label>
+      {fuelRole && <><label>FUEL ASH %<input type="number" min="0" max="100" value={fuelAsh} onChange={(event) => setFuelAsh(event.target.value)} /></label><label>CALORIFIC VALUE KCAL/KG<input type="number" min="0" value={fuelCv} onChange={(event) => setFuelCv(event.target.value)} /></label></>}
     </div>
-  );
+    <ChemistryInputs title="TYPICAL CHEMISTRY / MASS %" value={chemistry} setValue={setChemistry} />
+    <label className="check-line"><input type="checkbox" checked={hasRange} onChange={(event) => setHasRange(event.target.checked)} /> ADD LOW/HIGH COHERENT LAB OR QUARRY PROFILES</label>
+    {hasRange && <><ChemistryInputs title="LOW SCENARIO CHEMISTRY" value={chemistryMin} setValue={setChemistryMin} /><ChemistryInputs title="HIGH SCENARIO CHEMISTRY" value={chemistryMax} setValue={setChemistryMax} /></>}
+    {fuelRole && fuelAsh !== "" && <ChemistryInputs title="FUEL ASH CHEMISTRY" value={fuelAshChemistry} setValue={setFuelAshChemistry} />}
+    <div className="section-heading"><span>EVIDENCE</span><span>PROVENANCE TRAVELS WITH THE MATERIAL</span></div>
+    <div className="form-grid two"><label>EVIDENCE CLASS<select value={evidenceClass} onChange={(event) => setEvidenceClass(event.target.value)}><option value="measured">Measured</option><option value="official_project_document">Official project document</option><option value="vendor_data">Vendor data</option><option value="literature">Literature</option><option value="inferred">Inferred</option><option value="assumed">Assumed</option></select></label><label>SOURCE TITLE<input value={sourceTitle} onChange={(event) => setSourceTitle(event.target.value)} /></label><label>SOURCE URI<input value={sourceUri} onChange={(event) => setSourceUri(event.target.value)} /></label><label>PAGE / TABLE<input value={page} onChange={(event) => setPage(event.target.value)} /></label></div>
+    <label>NOTES<input value={notes} onChange={(event) => setNotes(event.target.value)} /></label><label>UNREPORTED / UNKNOWN FIELDS<input value={dataGaps} onChange={(event) => setDataGaps(event.target.value)} /></label>
+    <pre className="validation-log">INFO  Role controls process behaviour; subtype preserves your own name.{"\n"}INFO  Blank chemistry is unknown and propagates as N/A; zero means a real zero.{"\n"}{evidenceClass === "measured" ? "PASS  Measured evidence selected" : "WARN  Not measured — keep this out of the calibrated base case"}</pre>
+    {error && <div className="err">{error}</div>}<button className="run primary-action" disabled={!name.trim() || !sourceTitle.trim() || (materialType === "custom" && !customSubtype.trim())} onClick={() => void save()}>CREATE VERSIONED MATERIAL</button>
+  </div>;
 }

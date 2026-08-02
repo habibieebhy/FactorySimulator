@@ -16,29 +16,93 @@ class Evidence(BaseModel):
 
 
 class Chemistry(BaseModel):
-    cao: float = Field(ge=0, le=100)
-    sio2: float = Field(ge=0, le=100)
-    al2o3: float = Field(ge=0, le=100)
-    fe2o3: float = Field(ge=0, le=100)
-    mgo: float = Field(0, ge=0, le=100)
-    so3: float = Field(0, ge=0, le=100)
-    na2o: float = Field(0, ge=0, le=100)
-    k2o: float = Field(0, ge=0, le=100)
-    loi: float = Field(0, ge=0, le=100)
+    """Oxide mass percentages.
+
+    ``None`` means unreported/unknown.  A numeric zero is therefore reserved
+    for a genuinely measured or sourced zero.  This distinction prevents a
+    missing alkali or SO3 result from silently improving a candidate recipe.
+    """
+
+    cao: float | None = Field(default=None, ge=0, le=100)
+    sio2: float | None = Field(default=None, ge=0, le=100)
+    al2o3: float | None = Field(default=None, ge=0, le=100)
+    fe2o3: float | None = Field(default=None, ge=0, le=100)
+    mgo: float | None = Field(default=None, ge=0, le=100)
+    so3: float | None = Field(default=None, ge=0, le=100)
+    na2o: float | None = Field(default=None, ge=0, le=100)
+    k2o: float | None = Field(default=None, ge=0, le=100)
+    loi: float | None = Field(default=None, ge=0, le=100)
+
+
+FunctionalRole = Literal[
+    "raw_kiln_feed",
+    "corrective",
+    "clinker",
+    "cement_addition",
+    "set_regulator",
+    "process_additive",
+    "fuel",
+    "alternative_fuel",
+    "fuel_ash",
+    "recycled_process_material",
+]
 
 
 class MaterialCreate(BaseModel):
     name: str
     material_type: str
+    functional_role: FunctionalRole = "cement_addition"
+    custom_subtype: str | None = None
     location: str | None = None
     processing_state: str = "as_received"
     applicable_blend_classes: list[str] = Field(default_factory=list)
     chemistry: Chemistry
-    cost_inr_per_t: float | None = Field(None, ge=0)
-    co2_kg_per_t: float | None = Field(None, ge=0)
+    chemistry_min: Chemistry | None = None
+    chemistry_max: Chemistry | None = None
+    moisture_percent: float | None = Field(default=None, ge=0, le=100)
+    grindability_factor: float | None = Field(default=None, gt=0)
+    fuel_ash_percent: float | None = Field(default=None, ge=0, le=100)
+    fuel_calorific_value_kcal_kg: float | None = Field(default=None, gt=0)
+    fuel_ash_chemistry: Chemistry | None = None
+    cost_inr_per_t: float | None = Field(default=None, ge=0)
+    co2_kg_per_t: float | None = Field(default=None, ge=0)
     notes: str | None = None
     data_gaps: list[str] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def infer_legacy_role(self) -> "MaterialCreate":
+        """Classify V0.4/seed payloads that pre-date functional roles."""
+
+        if self.functional_role != "cement_addition":
+            return self
+        if self.material_type == "clinker":
+            self.functional_role = "clinker"
+        elif self.material_type == "gypsum":
+            self.functional_role = "set_regulator"
+        elif self.material_type in {"coal", "petcoke"}:
+            self.functional_role = "fuel"
+        elif self.material_type in {"biomass", "rdf", "alternative_fuel"}:
+            self.functional_role = "alternative_fuel"
+        elif self.material_type in {"silica_corrective", "iron_corrective", "bauxite", "laterite", "sand"}:
+            self.functional_role = "corrective"
+        elif "raw_meal" in self.applicable_blend_classes and "finished_cement" not in self.applicable_blend_classes:
+            self.functional_role = "raw_kiln_feed"
+        return self
+
+    @model_validator(mode="after")
+    def chemistry_ranges_are_ordered(self) -> "MaterialCreate":
+        for oxide in Chemistry.model_fields:
+            typical = getattr(self.chemistry, oxide)
+            low = getattr(self.chemistry_min, oxide) if self.chemistry_min else None
+            high = getattr(self.chemistry_max, oxide) if self.chemistry_max else None
+            if low is not None and high is not None and low > high:
+                raise ValueError(f"{oxide.upper()} minimum exceeds maximum")
+            if typical is not None and low is not None and low > typical:
+                raise ValueError(f"{oxide.upper()} minimum exceeds typical value")
+            if typical is not None and high is not None and high < typical:
+                raise ValueError(f"{oxide.upper()} maximum is below typical value")
+        return self
 
 
 class Material(MaterialCreate):
@@ -139,6 +203,9 @@ class BlendPreview(BaseModel):
     flattened_total_percentage: float
     flattened_components: list[ResolvedBlendComponent]
     chemistry: Chemistry
+    chemistry_scenario: Literal["low", "typical", "high"] = "typical"
+    chemistry_complete: bool = False
+    unknown_chemistry_fields: list[str] = Field(default_factory=list)
     material_cost_inr_t: float | None
     estimated_co2_kg_t: float | None
     warnings: list[str] = Field(default_factory=list)
@@ -154,12 +221,27 @@ class MachineBase(BaseModel):
     specific_heat_kcal_kg: float = Field(0, ge=0)
     capex_inr_crore: float = Field(0, ge=0)
     technology_readiness_level: int = Field(9, ge=1, le=9)
+    maximum_stable_tph: float | None = Field(default=None, gt=0)
+    design_blaine_m2_kg: float | None = Field(default=None, gt=0)
+    maximum_feed_moisture_percent: float | None = Field(default=None, ge=0, le=100)
+    minimum_temperature_c: float | None = Field(default=None, gt=0)
+    minimum_oxygen_percent: float | None = Field(default=None, ge=0, le=25)
+    maximum_oxygen_percent: float | None = Field(default=None, ge=0, le=25)
+    maximum_free_lime_percent: float | None = Field(default=None, ge=0, le=20)
     evidence: list[Evidence] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def stable_load_valid(self) -> "MachineBase":
         if self.minimum_stable_tph > self.rated_capacity_tph:
             raise ValueError("Minimum stable capacity exceeds rated capacity")
+        if self.maximum_stable_tph is not None and self.maximum_stable_tph < self.minimum_stable_tph:
+            raise ValueError("Maximum stable capacity is below minimum stable capacity")
+        if (
+            self.minimum_oxygen_percent is not None
+            and self.maximum_oxygen_percent is not None
+            and self.minimum_oxygen_percent > self.maximum_oxygen_percent
+        ):
+            raise ValueError("Minimum oxygen exceeds maximum oxygen")
         return self
 
 
@@ -233,10 +315,35 @@ class Route(RouteCreate):
     created_at: datetime
 
 
+class RouteAnalysis(BaseModel):
+    route_id: str
+    route_name: str
+    route_kind: str
+    description: str
+    flow_summary: str
+    compatible: bool
+    compatibility_score: float = Field(ge=0, le=100)
+    predicted_output_tph: float | None = None
+    bottleneck_machine_name: str | None = None
+    required_stages: list[str] = Field(default_factory=list)
+    present_stages: list[str] = Field(default_factory=list)
+    missing_stages: list[str] = Field(default_factory=list)
+    extra_stages: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+
+
+class RouteRecommendationSet(BaseModel):
+    blend_id: str
+    target_output_tph: float
+    selected_route_id: str | None = None
+    selected: RouteAnalysis | None = None
+    recommendations: list[RouteAnalysis] = Field(default_factory=list)
+
+
 class MaterialCostEntry(BaseModel):
     material_id: str
-    purchased_delivered_cost_inr_t: float | None = Field(None, ge=0)
-    internal_feed_cost_inr_t: float | None = Field(None, ge=0)
+    purchased_delivered_cost_inr_t: float | None = Field(default=None, ge=0)
+    internal_feed_cost_inr_t: float | None = Field(default=None, ge=0)
     evidence_class: str = "assumed"
     note: str | None = None
 
@@ -245,14 +352,14 @@ class CostBookCreate(BaseModel):
     name: str
     effective_date: str | None = None
     currency: str = "INR"
-    electricity_inr_kwh: float | None = Field(None, ge=0)
-    thermal_fuel_inr_mkcal: float | None = Field(None, ge=0)
-    packing_inr_t: float | None = Field(None, ge=0)
-    labour_inr_t: float | None = Field(None, ge=0)
-    maintenance_inr_t: float | None = Field(None, ge=0)
-    other_variable_inr_t: float | None = Field(None, ge=0)
-    factory_overhead_inr_t: float | None = Field(None, ge=0)
-    outbound_logistics_inr_t: float | None = Field(None, ge=0)
+    electricity_inr_kwh: float | None = Field(default=None, ge=0)
+    thermal_fuel_inr_mkcal: float | None = Field(default=None, ge=0)
+    packing_inr_t: float | None = Field(default=None, ge=0)
+    labour_inr_t: float | None = Field(default=None, ge=0)
+    maintenance_inr_t: float | None = Field(default=None, ge=0)
+    other_variable_inr_t: float | None = Field(default=None, ge=0)
+    factory_overhead_inr_t: float | None = Field(default=None, ge=0)
+    outbound_logistics_inr_t: float | None = Field(default=None, ge=0)
     material_costs: list[MaterialCostEntry] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     notes: str | None = None
@@ -267,6 +374,40 @@ class CostBook(CostBookCreate):
     created_at: datetime
 
 
+ChemistryScenario = Literal["low", "typical", "high"]
+
+
+class QualityMeasurements(BaseModel):
+    """Measured cement results used by the OPC 43 production gate.
+
+    The twin never invents strength or setting-time values.  Blank fields stay
+    untested and keep the gate at REVIEW rather than being treated as a pass.
+    """
+
+    blaine_m2_kg: float | None = Field(default=None, gt=0)
+    initial_setting_minutes: float | None = Field(default=None, ge=0)
+    final_setting_minutes: float | None = Field(default=None, ge=0)
+    le_chatelier_mm: float | None = Field(default=None, ge=0)
+    autoclave_expansion_percent: float | None = Field(default=None, ge=0)
+    strength_3d_mpa: float | None = Field(default=None, ge=0)
+    strength_7d_mpa: float | None = Field(default=None, ge=0)
+    strength_28d_mpa: float | None = Field(default=None, ge=0)
+
+
+class QualityCheck(BaseModel):
+    metric: str
+    measured: float | None
+    requirement: str
+    status: Literal["pass", "fail", "not_tested"]
+
+
+class QualityGate(BaseModel):
+    standard: str = "IS 269:2015 — OPC 43 grade screening"
+    status: Literal["pass", "fail", "review"]
+    checks: list[QualityCheck] = Field(default_factory=list)
+    note: str = "Laboratory test results are required; simulation chemistry alone cannot certify cement."
+
+
 class RunRequest(BaseModel):
     blend_id: str
     route_id: str
@@ -276,6 +417,54 @@ class RunRequest(BaseModel):
     electricity_inr_kwh: float = Field(8.5, ge=0)
     thermal_fuel_inr_mkcal: float = Field(900, ge=0)
     raw_meal_to_clinker_yield: float = Field(0.65, gt=0, le=1)
+    auto_mass_conversion: bool = True
+    chemistry_scenario: ChemistryScenario = "typical"
+    target_blaine_m2_kg: float | None = Field(default=None, gt=0)
+    fuel_material_id: str | None = None
+    fuel_rate_kg_t_clinker: float | None = Field(default=None, ge=0)
+    kiln_feed_moisture_percent: float | None = Field(default=None, ge=0, le=100)
+    kiln_oxygen_percent: float | None = Field(default=None, ge=0, le=25)
+    kiln_temperature_c: float | None = Field(default=None, gt=0)
+    clinker_free_lime_percent: float | None = Field(default=None, ge=0, le=20)
+    quality_measurements: QualityMeasurements | None = None
+
+
+class RawMixMaterialConstraint(BaseModel):
+    material_id: str
+    minimum_percent: float = Field(0, ge=0, le=100)
+    maximum_percent: float = Field(100, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def valid_range(self) -> "RawMixMaterialConstraint":
+        if self.minimum_percent > self.maximum_percent:
+            raise ValueError("Raw-mix minimum exceeds maximum")
+        return self
+
+
+class RawMixOptimisationRequest(BaseModel):
+    materials: list[RawMixMaterialConstraint] = Field(min_length=2)
+    target_lsf: float = Field(95, gt=0)
+    target_sm: float = Field(2.5, gt=0)
+    target_am: float = Field(1.5, gt=0)
+    chemistry_scenario: ChemistryScenario = "typical"
+
+
+class RawMixSuggestion(BaseModel):
+    material_id: str
+    material_name: str
+    percentage: float
+
+
+class RawMixOptimisationResult(BaseModel):
+    feasible: bool
+    suggestions: list[RawMixSuggestion]
+    chemistry: Chemistry
+    lsf: float | None
+    silica_modulus: float | None
+    alumina_modulus: float | None
+    estimated_clinker_yield: float | None
+    objective_error: float
+    warnings: list[str] = Field(default_factory=list)
 
 
 class RunEvent(BaseModel):
@@ -362,13 +551,21 @@ class RunResult(BaseModel):
     run_id: str
     created_at: datetime
     request: RunRequest
-    calculation_version: str = "0.4.0"
+    calculation_version: str = "0.5.0"
     blend_snapshot: Blend | None = None
     route_snapshot: Route | None = None
     cost_book_snapshot: CostBook | None = None
     material_snapshots: list[Material] = Field(default_factory=list)
     machine_snapshots: list[Machine] = Field(default_factory=list)
     chemistry: Chemistry
+    chemistry_scenario: ChemistryScenario = "typical"
+    route_analysis: RouteAnalysis | None = None
+    quality_gate: QualityGate | None = None
+    derived_raw_meal_to_clinker_yield: float | None = None
+    fuel_ash_contribution_kg_t_clinker: float | None = None
+    fuel_ash_adjusted_chemistry: Chemistry | None = None
+    grinding_capacity_factor: float = 1.0
+    grinding_energy_factor: float = 1.0
     lsf: float | None
     silica_modulus: float | None
     alumina_modulus: float | None
@@ -395,6 +592,32 @@ class RunResult(BaseModel):
     assumptions: list[AssumptionRecord] = Field(default_factory=list)
     evidence_references: list[Evidence] = Field(default_factory=list)
     events: list[RunEvent] = Field(default_factory=list)
+
+
+class CalibrationCreate(BaseModel):
+    run_id: str
+    actual_output_tph: float | None = Field(default=None, gt=0)
+    actual_electricity_kwh_t: float | None = Field(default=None, ge=0)
+    actual_thermal_kcal_kg: float | None = Field(default=None, ge=0)
+    actual_direct_cost_inr_t: float | None = Field(default=None, ge=0)
+    actual_co2_kg_t: float | None = Field(default=None, ge=0)
+    source_title: str
+    source_uri: str | None = None
+    note: str | None = None
+
+
+class CalibrationError(BaseModel):
+    metric: str
+    simulated: float | None
+    actual: float | None
+    absolute_error: float | None
+    percent_error: float | None
+
+
+class CalibrationRecord(CalibrationCreate):
+    calibration_id: str
+    created_at: datetime
+    errors: list[CalibrationError] = Field(default_factory=list)
 
 
 def now() -> datetime:

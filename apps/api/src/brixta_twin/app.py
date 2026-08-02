@@ -15,19 +15,27 @@ from .models import (
     Blend,
     BlendCreate,
     BlendPreview,
+    CalibrationCreate,
+    CalibrationError,
+    CalibrationRecord,
     CostBook,
     CostBookCreate,
     Machine,
     MachineCreate,
     Material,
     MaterialCreate,
+    RawMixOptimisationRequest,
+    RawMixOptimisationResult,
     Route,
     RouteCreate,
+    RouteRecommendationSet,
     RunRequest,
     RunResult,
     new_id,
     now,
 )
+from .optimisation import optimise_raw_mix
+from .routing import recommend_routes
 from .seed import seed
 from .simulation import Engine
 from .storage import Repository
@@ -40,7 +48,7 @@ def create_app(path: str | Path | None = None) -> FastAPI:
     repo = Repository(path)
     seed(repo)
     engine = Engine(repo)
-    app = FastAPI(title="BRIXTA Cement Twin API", version="0.4.0")
+    app = FastAPI(title="BRIXTA Cement Twin API", version="0.5.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -81,7 +89,7 @@ def create_app(path: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "service": "brixta-cement-twin-api", "version": "0.4.0"}
+        return {"status": "ok", "service": "brixta-cement-twin-api", "version": "0.5.0"}
 
     @app.get("/api/materials", response_model=list[Material])
     def materials(include_archived: bool = Query(False)) -> list[BaseModel]:
@@ -250,6 +258,25 @@ def create_app(path: str | Path | None = None) -> FastAPI:
     def delete_route(route_id: str) -> dict[str, object]:
         return safe_delete("routes", route_id, Route)
 
+    @app.get("/api/route-recommendations", response_model=RouteRecommendationSet)
+    def route_recommendations(
+        blend_id: str,
+        target_output_tph: float = Query(100, gt=0),
+        selected_route_id: str | None = None,
+    ) -> RouteRecommendationSet:
+        blend = require("blends", blend_id, Blend)
+        try:
+            return recommend_routes(repo, blend, target_output_tph, selected_route_id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/raw-mix/optimise", response_model=RawMixOptimisationResult)
+    def optimise(payload: RawMixOptimisationRequest) -> RawMixOptimisationResult:
+        try:
+            return optimise_raw_mix(repo, payload)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.get("/api/cost-books", response_model=list[CostBook])
     def cost_books(include_archived: bool = Query(False)) -> list[BaseModel]:
         return active("cost_books", include_archived)
@@ -294,6 +321,16 @@ def create_app(path: str | Path | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    @app.post("/api/runs/variability", response_model=list[RunResult])
+    def run_variability(payload: RunRequest) -> list[RunResult]:
+        try:
+            return [
+                engine.run(payload.model_copy(update={"chemistry_scenario": scenario}))
+                for scenario in ("low", "typical", "high")
+            ]
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.get("/api/runs", response_model=list[RunResult])
     def runs() -> list[BaseModel]:
         return repo.list("runs")
@@ -301,6 +338,43 @@ def create_app(path: str | Path | None = None) -> FastAPI:
     @app.get("/api/runs/{run_id}", response_model=RunResult)
     def get_run(run_id: str) -> RunResult:
         return require("runs", run_id, RunResult)
+
+    @app.get("/api/calibrations", response_model=list[CalibrationRecord])
+    def calibrations() -> list[BaseModel]:
+        return repo.list("calibrations")
+
+    @app.post("/api/calibrations", response_model=CalibrationRecord)
+    def add_calibration(payload: CalibrationCreate) -> BaseModel:
+        result = require("runs", payload.run_id, RunResult)
+        pairs = [
+            ("output_tph", result.achievable_output_tph, payload.actual_output_tph),
+            ("electricity_kwh_t", result.electricity_kwh_t, payload.actual_electricity_kwh_t),
+            ("thermal_kcal_kg", result.thermal_kcal_kg, payload.actual_thermal_kcal_kg),
+            ("direct_cost_inr_t", result.direct_model_cost_inr_t, payload.actual_direct_cost_inr_t),
+            ("co2_kg_t", result.estimated_co2_kg_t, payload.actual_co2_kg_t),
+        ]
+        errors = []
+        for metric, simulated, actual in pairs:
+            absolute = simulated - actual if simulated is not None and actual is not None else None
+            percent = absolute / actual * 100 if absolute is not None and actual not in {None, 0} else None
+            errors.append(
+                CalibrationError(
+                    metric=metric,
+                    simulated=simulated,
+                    actual=actual,
+                    absolute_error=absolute,
+                    percent_error=percent,
+                )
+            )
+        return repo.save(
+            "calibrations",
+            CalibrationRecord(
+                **payload.model_dump(),
+                calibration_id=new_id("cal"),
+                created_at=now(),
+                errors=errors,
+            ),
+        )
 
     @app.get("/api/runs/{run_id}/export.json")
     def export_run_json(run_id: str) -> Response:
@@ -323,7 +397,11 @@ def create_app(path: str | Path | None = None) -> FastAPI:
             ("run", "calculation_version", result.calculation_version, ""),
             ("configuration", "blend", result.blend_snapshot.name if result.blend_snapshot else result.request.blend_id, ""),
             ("configuration", "route", result.route_snapshot.name if result.route_snapshot else result.request.route_id, ""),
+            ("configuration", "route_kind", result.route_analysis.route_kind if result.route_analysis else "legacy", ""),
+            ("configuration", "route_flow", result.route_analysis.flow_summary if result.route_analysis else "legacy", ""),
+            ("configuration", "route_compatibility_score", result.route_analysis.compatibility_score if result.route_analysis else None, "0-100"),
             ("configuration", "cost_book", result.cost_book_snapshot.name if result.cost_book_snapshot else "none", ""),
+            ("configuration", "chemistry_scenario", result.chemistry_scenario, "low/typical/high"),
             ("output", "target", result.request.target_output_tph, "t/h cement"),
             ("output", "achieved", result.achievable_output_tph, "t/h cement"),
             ("output", "bottleneck", result.bottleneck_machine_name or "unknown", f"{result.bottleneck_tph:.3f} t/h cement-equivalent"),
@@ -335,6 +413,11 @@ def create_app(path: str | Path | None = None) -> FastAPI:
             ("cost", "plant_cash_cost", result.cost_breakdown.plant_cash_cost_inr_t if result.cost_breakdown else None, "INR/t cement"),
             ("cost", "full_cost", result.cost_breakdown.full_cost_inr_t if result.cost_breakdown else None, "INR/t cement"),
             ("carbon", "materials", result.estimated_co2_kg_t, "kg CO2/t cement"),
+            ("mass_conversion", "derived_raw_meal_to_clinker_yield", result.derived_raw_meal_to_clinker_yield, "fraction"),
+            ("process_correction", "grinding_capacity_factor", result.grinding_capacity_factor, "multiplier"),
+            ("process_correction", "grinding_energy_factor", result.grinding_energy_factor, "multiplier"),
+            ("process_correction", "fuel_ash_contribution", result.fuel_ash_contribution_kg_t_clinker, "kg/t clinker"),
+            ("quality", "OPC43_gate", result.quality_gate.status if result.quality_gate else "not_applicable", "measured-results gate"),
         ]
         writer.writerows(rows)
         for item in result.material_metrics:
@@ -343,6 +426,16 @@ def create_app(path: str | Path | None = None) -> FastAPI:
             writer.writerow(["machine", item.machine_name, item.load_percent, "load percent"])
         for item in result.validation:
             writer.writerow(["validation", item.code, item.severity, item.message])
+        if result.route_analysis:
+            for reason in result.route_analysis.reasons:
+                writer.writerow(["route", "reason", reason, ""])
+        if result.quality_gate:
+            for check in result.quality_gate.checks:
+                writer.writerow(["quality", check.metric, check.measured, f"{check.status}; {check.requirement}"])
+        for item in result.assumptions:
+            writer.writerow(["assumption", item.key, item.value, item.basis])
+        for item in result.evidence_references:
+            writer.writerow(["evidence", item.source_title, item.evidence_class, item.page or item.source_uri or ""])
         return Response(
             content=output.getvalue(),
             media_type="text/csv",

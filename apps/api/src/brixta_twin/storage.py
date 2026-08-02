@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from .models import Blend, CostBook, Machine, Material, Route, RunResult
+from .models import Blend, CalibrationRecord, CostBook, Machine, Material, Route, RunResult
 
 
 class Repository:
@@ -17,6 +17,7 @@ class Repository:
         "routes": Route,
         "cost_books": CostBook,
         "runs": RunResult,
+        "calibrations": CalibrationRecord,
     }
     id_fields = {
         "materials": "material_id",
@@ -25,6 +26,7 @@ class Repository:
         "routes": "route_id",
         "cost_books": "cost_book_id",
         "runs": "run_id",
+        "calibrations": "calibration_id",
     }
 
     def __init__(self, path: str | Path | None = None) -> None:
@@ -138,4 +140,9 @@ class Repository:
                 assert isinstance(item, RunResult)
                 if item.request.cost_book_id == entity_id:
                     references.append(f"run:{item.run_id}")
+        elif table == "runs":
+            for item in self.list("calibrations"):
+                assert isinstance(item, CalibrationRecord)
+                if item.run_id == entity_id:
+                    references.append(f"calibration:{item.calibration_id}")
         return sorted(set(references))

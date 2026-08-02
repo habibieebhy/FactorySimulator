@@ -7,15 +7,15 @@ export type Evidence = {
 };
 
 export type Chemistry = {
-  cao: number;
-  sio2: number;
-  al2o3: number;
-  fe2o3: number;
-  mgo: number;
-  so3: number;
-  na2o: number;
-  k2o: number;
-  loi: number;
+  cao: number | null;
+  sio2: number | null;
+  al2o3: number | null;
+  fe2o3: number | null;
+  mgo: number | null;
+  so3: number | null;
+  na2o: number | null;
+  k2o: number | null;
+  loi: number | null;
 };
 
 export type Material = {
@@ -27,10 +27,19 @@ export type Material = {
   created_at: string;
   name: string;
   material_type: string;
+  functional_role: string;
+  custom_subtype?: string | null;
   location?: string | null;
   processing_state: string;
   applicable_blend_classes: string[];
   chemistry: Chemistry;
+  chemistry_min?: Chemistry | null;
+  chemistry_max?: Chemistry | null;
+  moisture_percent?: number | null;
+  grindability_factor?: number | null;
+  fuel_ash_percent?: number | null;
+  fuel_calorific_value_kcal_kg?: number | null;
+  fuel_ash_chemistry?: Chemistry | null;
   cost_inr_per_t: number | null;
   co2_kg_per_t: number | null;
   notes?: string | null;
@@ -78,6 +87,9 @@ export type BlendPreview = {
   flattened_total_percentage: number;
   flattened_components: ResolvedBlendComponent[];
   chemistry: Chemistry;
+  chemistry_scenario: "low" | "typical" | "high";
+  chemistry_complete: boolean;
+  unknown_chemistry_fields: string[];
   material_cost_inr_t: number | null;
   estimated_co2_kg_t: number | null;
   warnings: string[];
@@ -100,6 +112,14 @@ export type Machine = {
   specific_heat_kcal_kg: number;
   capex_inr_crore: number;
   technology_readiness_level: number;
+  maximum_stable_tph?: number | null;
+  design_blaine_m2_kg?: number | null;
+  maximum_feed_moisture_percent?: number | null;
+  minimum_temperature_c?: number | null;
+  maximum_temperature_c?: number | null;
+  minimum_oxygen_percent?: number | null;
+  maximum_oxygen_percent?: number | null;
+  maximum_free_lime_percent?: number | null;
   evidence: Evidence[];
 };
 
@@ -125,6 +145,31 @@ export type Route = {
     target: string;
     stream_type: string;
   }[];
+};
+
+export type RouteAnalysis = {
+  route_id: string;
+  route_name: string;
+  route_kind: string;
+  description: string;
+  flow_summary: string;
+  compatible: boolean;
+  compatibility_score: number;
+  predicted_output_tph: number | null;
+  bottleneck_machine_name: string | null;
+  required_stages: string[];
+  present_stages: string[];
+  missing_stages: string[];
+  extra_stages: string[];
+  reasons: string[];
+};
+
+export type RouteRecommendationSet = {
+  blend_id: string;
+  target_output_tph: number;
+  selected_route_id: string | null;
+  selected: RouteAnalysis | null;
+  recommendations: RouteAnalysis[];
 };
 
 export type MaterialCostEntry = {
@@ -205,6 +250,16 @@ export type Result = {
     electricity_inr_kwh: number;
     thermal_fuel_inr_mkcal: number;
     raw_meal_to_clinker_yield: number;
+    auto_mass_conversion: boolean;
+    chemistry_scenario: "low" | "typical" | "high";
+    target_blaine_m2_kg?: number | null;
+    fuel_material_id?: string | null;
+    fuel_rate_kg_t_clinker?: number | null;
+    kiln_feed_moisture_percent?: number | null;
+    kiln_oxygen_percent?: number | null;
+    kiln_temperature_c?: number | null;
+    clinker_free_lime_percent?: number | null;
+    quality_measurements?: QualityMeasurements | null;
   };
   blend_snapshot: Blend | null;
   route_snapshot: Route | null;
@@ -212,6 +267,14 @@ export type Result = {
   material_snapshots: Material[];
   machine_snapshots: Machine[];
   chemistry: Chemistry;
+  chemistry_scenario: "low" | "typical" | "high";
+  route_analysis: RouteAnalysis | null;
+  quality_gate: QualityGate | null;
+  derived_raw_meal_to_clinker_yield: number | null;
+  fuel_ash_contribution_kg_t_clinker: number | null;
+  fuel_ash_adjusted_chemistry: Chemistry | null;
+  grinding_capacity_factor: number;
+  grinding_energy_factor: number;
   achievable_output_tph: number;
   total_output_tonnes: number;
   bottleneck_tph: number;
@@ -270,4 +333,49 @@ export type Result = {
     component: string;
     message: string;
   }[];
+};
+
+export type QualityMeasurements = {
+  blaine_m2_kg?: number | null;
+  initial_setting_minutes?: number | null;
+  final_setting_minutes?: number | null;
+  le_chatelier_mm?: number | null;
+  autoclave_expansion_percent?: number | null;
+  strength_3d_mpa?: number | null;
+  strength_7d_mpa?: number | null;
+  strength_28d_mpa?: number | null;
+};
+
+export type QualityGate = {
+  standard: string;
+  status: "pass" | "fail" | "review";
+  checks: { metric: string; measured: number | null; requirement: string; status: "pass" | "fail" | "not_tested" }[];
+  note: string;
+};
+
+export type RawMixResult = {
+  feasible: boolean;
+  suggestions: { material_id: string; material_name: string; percentage: number }[];
+  chemistry: Chemistry;
+  lsf: number | null;
+  silica_modulus: number | null;
+  alumina_modulus: number | null;
+  estimated_clinker_yield: number | null;
+  objective_error: number;
+  warnings: string[];
+};
+
+export type Calibration = {
+  calibration_id: string;
+  run_id: string;
+  created_at: string;
+  actual_output_tph: number | null;
+  actual_electricity_kwh_t: number | null;
+  actual_thermal_kcal_kg: number | null;
+  actual_direct_cost_inr_t: number | null;
+  actual_co2_kg_t: number | null;
+  source_title: string;
+  source_uri?: string | null;
+  note?: string | null;
+  errors: { metric: string; simulated: number | null; actual: number | null; absolute_error: number | null; percent_error: number | null }[];
 };
