@@ -24,11 +24,23 @@ from .models import (
 )
 from .optimisation import cement_moduli
 from .quality import opc43_gate
-from .routing import analyse_route
+from .routing import analyse_route, stage_throughput_factor
 from .storage import Repository
 
 
-CALCULATION_VERSION = "0.5.0"
+CALCULATION_VERSION = "0.5.2"
+
+
+def _output_product(blend: Blend, route: Route) -> str:
+    if route.route_kind == "clinker_only":
+        return "clinker"
+    return {
+        "raw_material_stockpile": "raw material",
+        "raw_meal": "raw meal",
+        "clinker_blend": "clinker",
+        "finished_cement": "cement",
+        "premix": "premix",
+    }.get(blend.blend_class, "product")
 
 
 def _unique_evidence(items: list[Evidence]) -> list[Evidence]:
@@ -305,29 +317,17 @@ class Engine:
                     "One or more material grindability factors are unknown; 1.0 was used for those components",
                 )
 
-        def stage_factor(machine: Machine) -> float:
-            if blend.blend_class != "finished_cement":
-                active_stages = {
-                    "raw_material_stockpile": {"crushing"},
-                    "raw_meal": {"crushing", "raw_grinding"},
-                    "clinker_blend": {"thermal_transformation"},
-                    "premix": {"cement_grinding"},
-                }.get(blend.blend_class, set())
-                return 1.0 if machine.process_stage in active_stages else 0.0
-            if not has_upstream_clinker_process and not produces_calcined_clay:
-                return 1.0
-            if machine.process_stage in {"crushing", "raw_grinding"}:
-                return clinker_fraction / effective_yield
-            if machine.process_stage == "thermal_transformation":
-                return clinker_fraction
-            if machine.process_stage == "clay_calcination":
-                return calcined_clay_fraction
-            return 1.0
-
         capacity_candidates: list[tuple[float, str, Machine]] = []
         machine_factors: list[tuple[str, Machine, float, float, float | None]] = []
         for node_id, machine in machines:
-            factor = stage_factor(machine)
+            factor = stage_throughput_factor(
+                machine,
+                blend,
+                route_stages,
+                fractions_by_type,
+                effective_yield,
+                route.route_kind,
+            )
             effective_capacity = machine.rated_capacity_tph * machine.availability
             if machine.maximum_stable_tph is not None:
                 effective_capacity = min(effective_capacity, machine.maximum_stable_tph)
@@ -338,12 +338,56 @@ class Engine:
                 capacity_candidates.append((cement_capacity, node_id, machine))
             machine_factors.append((node_id, machine, factor, effective_capacity, cement_capacity))
 
+        # Validate every active kiln before publishing production, energy or
+        # cost results.  A BLOCK is a failed operating case, not a warning that
+        # may coexist with a successful achieved-output headline.
+        for _, machine, factor, _, _ in machine_factors:
+            if factor <= 0 or machine.process_stage != "thermal_transformation":
+                continue
+            if (
+                machine.maximum_feed_moisture_percent is not None
+                and request.kiln_feed_moisture_percent is not None
+                and request.kiln_feed_moisture_percent > machine.maximum_feed_moisture_percent
+            ):
+                validate("block", "KILN_MOISTURE_ENVELOPE", f"Kiln feed moisture exceeds {machine.name}'s stored limit")
+            if (
+                machine.minimum_temperature_c is not None
+                and request.kiln_temperature_c is not None
+                and request.kiln_temperature_c < machine.minimum_temperature_c
+            ):
+                validate("block", "KILN_TEMPERATURE_ENVELOPE", f"Kiln temperature is below {machine.name}'s stored minimum")
+            if (
+                machine.maximum_temperature_c is not None
+                and request.kiln_temperature_c is not None
+                and request.kiln_temperature_c > machine.maximum_temperature_c
+            ):
+                validate("block", "KILN_TEMPERATURE_ENVELOPE", f"Kiln temperature exceeds {machine.name}'s stored maximum")
+            if (
+                machine.minimum_oxygen_percent is not None
+                and request.kiln_oxygen_percent is not None
+                and request.kiln_oxygen_percent < machine.minimum_oxygen_percent
+            ):
+                validate("block", "KILN_OXYGEN_ENVELOPE", f"Kiln oxygen is below {machine.name}'s stored minimum")
+            if (
+                machine.maximum_oxygen_percent is not None
+                and request.kiln_oxygen_percent is not None
+                and request.kiln_oxygen_percent > machine.maximum_oxygen_percent
+            ):
+                validate("block", "KILN_OXYGEN_ENVELOPE", f"Kiln oxygen exceeds {machine.name}'s stored maximum")
+            if (
+                machine.maximum_free_lime_percent is not None
+                and request.clinker_free_lime_percent is not None
+                and request.clinker_free_lime_percent > machine.maximum_free_lime_percent
+            ):
+                validate("block", "FREE_LIME_GATE", f"Measured clinker free lime exceeds {machine.name}'s stored limit")
+
         if not capacity_candidates:
             raise ValueError("No route machine is required by this blend")
         bottleneck, bottleneck_node_id, bottleneck_machine = min(
             capacity_candidates, key=lambda item: item[0]
         )
-        output = min(request.target_output_tph, bottleneck)
+        run_blocked = any(item.severity == "block" for item in validation)
+        output = 0.0 if run_blocked else min(request.target_output_tph, bottleneck)
         total_output = output * request.duration_hours
 
         machine_metrics: list[MachineRunMetric] = []
@@ -351,10 +395,18 @@ class Engine:
         thermal = 0.0
         for node_id, machine, factor, effective_capacity, cement_capacity in machine_factors:
             actual_throughput = output * factor
+            target_throughput = request.target_output_tph * factor
             load_percent = actual_throughput / effective_capacity * 100 if effective_capacity else 0
+            target_load_percent = target_throughput / effective_capacity * 100 if effective_capacity else 0
             stage_energy_factor = grinding_energy_factor if machine.process_stage == "cement_grinding" else 1.0
-            electricity_contribution = machine.specific_electricity_kwh_t * factor * stage_energy_factor
-            thermal_contribution = machine.specific_heat_kcal_kg * factor
+            electricity_contribution = (
+                0.0
+                if run_blocked
+                else machine.specific_electricity_kwh_t * factor * stage_energy_factor
+            )
+            thermal_contribution = (
+                0.0 if run_blocked else machine.specific_heat_kcal_kg * factor
+            )
             electricity += electricity_contribution
             thermal += thermal_contribution
             machine_metrics.append(
@@ -367,6 +419,8 @@ class Engine:
                     actual_throughput_tph=actual_throughput,
                     effective_capacity_tph=effective_capacity,
                     cement_equivalent_capacity_tph=cement_capacity,
+                    target_throughput_tph=target_throughput,
+                    target_load_percent=target_load_percent,
                     load_percent=load_percent,
                     electricity_kwh_t_cement=electricity_contribution,
                     thermal_kcal_kg_cement=thermal_contribution,
@@ -377,7 +431,7 @@ class Engine:
                 machine.machine_id,
                 f"stage={actual_throughput:.2f} t/h capacity={effective_capacity:.2f} t/h load={load_percent:.1f}% factor={factor:.4f}",
             )
-            if factor > 0 and actual_throughput < machine.minimum_stable_tph:
+            if not run_blocked and factor > 0 and actual_throughput < machine.minimum_stable_tph:
                 validate(
                     "warning",
                     "MINIMUM_STABLE_LOAD",
@@ -389,55 +443,17 @@ class Engine:
                     "LOW_TRL",
                     f"{machine.name} is TRL {machine.technology_readiness_level}; exclude it from an investor base case",
                 )
-            if machine.process_stage == "thermal_transformation":
-                if (
-                    machine.maximum_feed_moisture_percent is not None
-                    and request.kiln_feed_moisture_percent is not None
-                    and request.kiln_feed_moisture_percent > machine.maximum_feed_moisture_percent
-                ):
-                    validate("block", "KILN_MOISTURE_ENVELOPE", f"Kiln feed moisture exceeds {machine.name}'s stored limit")
-                if (
-                    machine.minimum_temperature_c is not None
-                    and request.kiln_temperature_c is not None
-                    and request.kiln_temperature_c < machine.minimum_temperature_c
-                ):
-                    validate("block", "KILN_TEMPERATURE_ENVELOPE", f"Kiln temperature is below {machine.name}'s stored minimum")
-                if (
-                    machine.maximum_temperature_c is not None
-                    and request.kiln_temperature_c is not None
-                    and request.kiln_temperature_c > machine.maximum_temperature_c
-                ):
-                    validate("block", "KILN_TEMPERATURE_ENVELOPE", f"Kiln temperature exceeds {machine.name}'s stored maximum")
-                if (
-                    machine.minimum_oxygen_percent is not None
-                    and request.kiln_oxygen_percent is not None
-                    and request.kiln_oxygen_percent < machine.minimum_oxygen_percent
-                ):
-                    validate("block", "KILN_OXYGEN_ENVELOPE", f"Kiln oxygen is below {machine.name}'s stored minimum")
-                if (
-                    machine.maximum_oxygen_percent is not None
-                    and request.kiln_oxygen_percent is not None
-                    and request.kiln_oxygen_percent > machine.maximum_oxygen_percent
-                ):
-                    validate("block", "KILN_OXYGEN_ENVELOPE", f"Kiln oxygen exceeds {machine.name}'s stored maximum")
-                if (
-                    machine.maximum_free_lime_percent is not None
-                    and request.clinker_free_lime_percent is not None
-                    and request.clinker_free_lime_percent > machine.maximum_free_lime_percent
-                ):
-                    validate("block", "FREE_LIME_GATE", f"Measured clinker free lime exceeds {machine.name}'s stored limit")
-
         if request.target_output_tph > bottleneck:
             validate(
                 "warning",
                 "CAPACITY_CONSTRAINT",
-                f"{bottleneck_machine.name} constrains cement output at {bottleneck:.2f} t/h",
+                f"{bottleneck_machine.name} constrains {_output_product(blend, route)} output at {bottleneck:.2f} t/h",
             )
         else:
             validate(
                 "info",
                 "CAPACITY_HEADROOM",
-                f"Target is feasible; {bottleneck_machine.name} has {bottleneck - output:.2f} t/h cement-equivalent headroom",
+                f"Target is feasible; {bottleneck_machine.name} has {bottleneck - output:.2f} t/h {_output_product(blend, route)} headroom",
             )
 
         electricity_rate = (
@@ -450,15 +466,62 @@ class Engine:
             if cost_book and cost_book.thermal_fuel_inr_mkcal is not None
             else request.thermal_fuel_inr_mkcal
         )
+        electricity_tariff_source = (
+            f"cost book {cost_book.name} v{cost_book.version}"
+            if cost_book and cost_book.electricity_inr_kwh is not None
+            else "run input"
+        )
+        thermal_tariff_source = (
+            f"cost book {cost_book.name} v{cost_book.version}"
+            if cost_book and cost_book.thermal_fuel_inr_mkcal is not None
+            else "run input"
+        )
+        if (
+            cost_book
+            and cost_book.electricity_inr_kwh is not None
+            and abs(cost_book.electricity_inr_kwh - request.electricity_inr_kwh) > 1e-9
+        ):
+            validate(
+                "warning",
+                "COST_BOOK_ELECTRICITY_OVERRIDE",
+                "Selected cost book overrides the run electricity tariff: "
+                f"₹{request.electricity_inr_kwh:.2f}/kWh entered, "
+                f"₹{electricity_rate:.2f}/kWh applied",
+            )
+        if (
+            cost_book
+            and cost_book.thermal_fuel_inr_mkcal is not None
+            and abs(cost_book.thermal_fuel_inr_mkcal - request.thermal_fuel_inr_mkcal) > 1e-9
+        ):
+            validate(
+                "warning",
+                "COST_BOOK_THERMAL_OVERRIDE",
+                "Selected cost book overrides the run thermal-fuel tariff: "
+                f"₹{request.thermal_fuel_inr_mkcal:.2f}/million kcal entered, "
+                f"₹{thermal_rate:.2f}/million kcal applied",
+            )
         electricity_cost = electricity * electricity_rate
         thermal_cost = thermal * thermal_rate / 1000
         energy_cost = electricity_cost + thermal_cost
+
+        # Blend percentages live on the blend's own mass basis.  A raw-meal
+        # recipe sent through a clinker-only route therefore consumes
+        # 1 / yield tonnes of blend for every tonne of clinker output.  Finished
+        # cement and all same-basis routes retain the normal 1:1 factor.
+        output_product = _output_product(blend, route)
+        material_input_factor = (
+            1.0 / max(effective_yield, 1e-9)
+            if blend.blend_class == "raw_meal" and output_product == "clinker"
+            else 1.0
+        )
         material_metrics: list[MaterialRunMetric] = []
         material_cost_entries = {
             entry.material_id: entry for entry in (cost_book.material_costs if cost_book else [])
         }
         material_cost_contributions: list[float] = []
         missing_material_costs: list[str] = []
+        material_co2_contributions: list[float] = []
+        missing_material_co2: list[str] = []
 
         def applied_material_cost(material: Material) -> tuple[float | None, str]:
             internally_produced = (
@@ -481,30 +544,57 @@ class Engine:
         for component in preview.flattened_components:
             material = materials[component.material_id]
             fraction = component.percentage / 100.0
+            tonnes_per_t_output = fraction * material_input_factor
             unit_cost, cost_basis = applied_material_cost(material)
-            contribution = unit_cost * fraction if unit_cost is not None else None
+            contribution = (
+                unit_cost * tonnes_per_t_output if unit_cost is not None else None
+            )
             if contribution is None:
                 missing_material_costs.append(material.name)
             else:
                 material_cost_contributions.append(contribution)
+            co2_contribution = (
+                material.co2_kg_per_t * tonnes_per_t_output
+                if material.co2_kg_per_t is not None
+                else None
+            )
+            if co2_contribution is None:
+                missing_material_co2.append(material.name)
+            else:
+                material_co2_contributions.append(co2_contribution)
             material_metrics.append(
                 MaterialRunMetric(
                     material_id=material.material_id,
                     material_name=material.name,
                     material_type=material.material_type,
                     percentage=component.percentage,
-                    tonnes_per_hour=output * fraction,
-                    tonnes_per_run=total_output * fraction,
+                    tonnes_per_t_output=tonnes_per_t_output,
+                    tonnes_per_hour=output * tonnes_per_t_output,
+                    tonnes_per_run=total_output * tonnes_per_t_output,
                     applied_unit_cost_inr_t=unit_cost,
                     cost_basis=cost_basis,
                     cost_inr_t_cement=contribution,
-                    co2_kg_t_cement=(material.co2_kg_per_t * fraction if material.co2_kg_per_t is not None else None),
+                    co2_kg_t_cement=co2_contribution,
                     evidence_class=component.evidence_class,
                 )
             )
 
+        total_material_input_tph = sum(
+            item.tonnes_per_hour for item in material_metrics
+        )
+        total_material_input_tonnes = sum(
+            item.tonnes_per_run for item in material_metrics
+        )
+
         material_cost = (
-            sum(material_cost_contributions) if not missing_material_costs else None
+            sum(material_cost_contributions)
+            if not missing_material_costs and not run_blocked
+            else None
+        )
+        material_co2 = (
+            sum(material_co2_contributions)
+            if not missing_material_co2 and not run_blocked
+            else None
         )
         if missing_material_costs:
             validate(
@@ -565,9 +655,18 @@ class Engine:
 
         assumptions = [
             AssumptionRecord(key="calculation_version", value=CALCULATION_VERSION, basis="Deterministic screening engine"),
-            AssumptionRecord(key="electricity_tariff", value=f"₹{electricity_rate:.2f}/kWh", basis=f"Cost book {cost_book.name}" if cost_book and cost_book.electricity_inr_kwh is not None else "Run input"),
-            AssumptionRecord(key="thermal_fuel_tariff", value=f"₹{thermal_rate:.2f}/million kcal", basis=f"Cost book {cost_book.name}" if cost_book and cost_book.thermal_fuel_inr_mkcal is not None else "Run input"),
+            AssumptionRecord(key="electricity_tariff", value=f"₹{electricity_rate:.2f}/kWh", basis=electricity_tariff_source),
+            AssumptionRecord(key="thermal_fuel_tariff", value=f"₹{thermal_rate:.2f}/million kcal", basis=thermal_tariff_source),
             AssumptionRecord(key="run_duration", value=f"{request.duration_hours:.2f} h", basis="Run input"),
+            AssumptionRecord(
+                key="material_input_basis",
+                value=f"{material_input_factor:.6f} t input/t {output_product}",
+                basis=(
+                    "Raw-meal blend divided by raw-meal-to-clinker yield"
+                    if material_input_factor != 1.0
+                    else "Blend and output use the same mass basis"
+                ),
+            ),
         ]
         assumptions.append(
             AssumptionRecord(
@@ -620,14 +719,26 @@ class Engine:
 
         warnings = [item.message for item in validation if item.severity in {"warning", "block"}]
         information = [item.message for item in validation if item.severity == "info"]
-        log("CHECK", "MASS", f"Direct={preview.direct_total_percentage:.3f}% flattened={preview.flattened_total_percentage:.3f}%")
-        log("RESULT", "RUN", f"Completed with {len(warnings)} warnings and {len(information)} information messages")
+        log(
+            "CHECK",
+            "MASS",
+            f"Direct={preview.direct_total_percentage:.3f}% "
+            f"flattened={preview.flattened_total_percentage:.3f}% "
+            f"output={output:.3f} t/h {output_product} "
+            f"material_input={total_material_input_tph:.3f} t/h",
+        )
+        if run_blocked:
+            log("RESULT", "RUN", "BLOCKED: no achieved production, energy or cost result is valid until all blocking conditions are resolved")
+        else:
+            log("RESULT", "RUN", f"Completed with {len(warnings)} warnings and {len(information)} information messages")
 
         result = RunResult(
             run_id=new_id("run"),
             created_at=now(),
             request=request,
             calculation_version=CALCULATION_VERSION,
+            run_status="blocked" if run_blocked else "completed",
+            output_product=output_product,
             blend_snapshot=blend,
             route_snapshot=route,
             cost_book_snapshot=cost_book,
@@ -650,12 +761,19 @@ class Engine:
             bottleneck_machine_name=bottleneck_machine.name,
             achievable_output_tph=output,
             total_output_tonnes=total_output,
+            material_input_t_per_t_output=material_input_factor,
+            total_material_input_tph=total_material_input_tph,
+            total_material_input_tonnes=total_material_input_tonnes,
             electricity_kwh_t=electricity,
             thermal_kcal_kg=thermal,
+            applied_electricity_inr_kwh=electricity_rate,
+            electricity_tariff_source=electricity_tariff_source,
+            applied_thermal_fuel_inr_mkcal=thermal_rate,
+            thermal_tariff_source=thermal_tariff_source,
             material_cost_inr_t=material_cost,
             energy_cost_inr_t=energy_cost,
             direct_model_cost_inr_t=direct_cost,
-            estimated_co2_kg_t=preview.estimated_co2_kg_t,
+            estimated_co2_kg_t=material_co2,
             resolved_components=preview.flattened_components,
             material_metrics=material_metrics,
             machine_metrics=machine_metrics,
@@ -683,9 +801,15 @@ class Engine:
                 total_thermal_gcal=thermal * total_output / 1000,
             ),
             carbon_breakdown=CarbonBreakdown(
-                materials_kg_co2_t=preview.estimated_co2_kg_t,
-                total_materials_tonnes=total_output,
-                total_materials_kg_co2=(preview.estimated_co2_kg_t * total_output if preview.estimated_co2_kg_t is not None else None),
+                materials_kg_co2_t=(
+                    material_co2
+                ),
+                total_materials_tonnes=total_material_input_tonnes,
+                total_materials_kg_co2=(
+                    material_co2 * total_output
+                    if material_co2 is not None
+                    else None
+                ),
                 exclusions=["site-specific transport", "construction CAPEX", "downstream concrete use and carbonation"],
             ),
             validation=validation,

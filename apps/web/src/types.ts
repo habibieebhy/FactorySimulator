@@ -218,6 +218,8 @@ export type MachineRunMetric = {
   actual_throughput_tph: number;
   effective_capacity_tph: number;
   cement_equivalent_capacity_tph: number | null;
+  target_throughput_tph: number;
+  target_load_percent: number;
   load_percent: number;
   electricity_kwh_t_cement: number;
   thermal_kcal_kg_cement: number;
@@ -228,6 +230,7 @@ export type MaterialRunMetric = {
   material_name: string;
   material_type: string;
   percentage: number;
+  tonnes_per_t_output: number | null;
   tonnes_per_hour: number;
   tonnes_per_run: number;
   applied_unit_cost_inr_t: number | null;
@@ -241,6 +244,8 @@ export type Result = {
   run_id: string;
   created_at: string;
   calculation_version: string;
+  run_status: "completed" | "blocked";
+  output_product: string;
   request: {
     blend_id: string;
     route_id: string;
@@ -277,11 +282,18 @@ export type Result = {
   grinding_energy_factor: number;
   achievable_output_tph: number;
   total_output_tonnes: number;
+  material_input_t_per_t_output: number | null;
+  total_material_input_tph: number | null;
+  total_material_input_tonnes: number | null;
   bottleneck_tph: number;
   bottleneck_machine_id: string | null;
   bottleneck_machine_name: string | null;
   electricity_kwh_t: number;
   thermal_kcal_kg: number;
+  applied_electricity_inr_kwh: number | null;
+  electricity_tariff_source: string;
+  applied_thermal_fuel_inr_mkcal: number | null;
+  thermal_tariff_source: string;
   material_cost_inr_t: number | null;
   energy_cost_inr_t: number;
   direct_model_cost_inr_t: number | null;

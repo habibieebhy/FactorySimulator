@@ -14,9 +14,11 @@ ROUTE_DESCRIPTIONS = {
 }
 
 
-def required_stages(blend: Blend) -> set[str]:
+def required_stages(blend: Blend, route_kind: str | None = None) -> set[str]:
     if blend.blend_class == "raw_material_stockpile":
         return {"crushing"}
+    if blend.blend_class == "raw_meal" and route_kind == "clinker_only":
+        return {"crushing", "raw_grinding", "thermal_transformation"}
     if blend.blend_class == "raw_meal":
         return {"crushing", "raw_grinding"}
     if blend.blend_class == "clinker_blend":
@@ -28,18 +30,25 @@ def required_stages(blend: Blend) -> set[str]:
     return set()
 
 
-def _stage_factor(
+def stage_throughput_factor(
     machine: Machine,
     blend: Blend,
     route_stages: set[str],
     fractions_by_type: dict[str, float],
     raw_meal_to_clinker_yield: float,
+    route_kind: str | None = None,
 ) -> float:
+    if blend.blend_class == "raw_meal" and route_kind == "clinker_only":
+        if machine.process_stage in {"crushing", "raw_grinding"}:
+            return 1.0 / max(raw_meal_to_clinker_yield, 1e-9)
+        if machine.process_stage == "thermal_transformation":
+            return 1.0
+        return 0.0
     if blend.blend_class != "finished_cement":
         # Intermediate products stop at their own process boundary.  Extra
         # machines in a full integrated route must not silently constrain or
         # consume energy for a raw-meal, stockpile or premix campaign.
-        return 1.0 if machine.process_stage in required_stages(blend) else 0.0
+        return 1.0 if machine.process_stage in required_stages(blend, route_kind) else 0.0
     clinker_fraction = fractions_by_type.get("clinker", 0.0)
     calcined_clay_fraction = fractions_by_type.get("calcined_clay", 0.0)
     if "thermal_transformation" in route_stages:
@@ -67,7 +76,7 @@ def analyse_route(
             machines.append(machine)
 
     stages = {machine.process_stage for machine in machines}
-    required = required_stages(blend)
+    required = required_stages(blend, route.route_kind)
     missing = required - stages
     extra = stages - required
     fractions: dict[str, float] = {}
@@ -81,12 +90,13 @@ def analyse_route(
     for machine in machines:
         if machine.technology_readiness_level < 8:
             low_trl += 1
-        factor = _stage_factor(
+        factor = stage_throughput_factor(
             machine,
             blend,
             stages,
             fractions,
             raw_meal_to_clinker_yield,
+            route.route_kind,
         )
         if factor <= 0:
             continue

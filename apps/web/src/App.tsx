@@ -38,6 +38,7 @@ function ProcessNode({ data }: NodeProps) {
     capacity: number;
     load: number;
     energy: number;
+    outputProduct: string;
     active: boolean;
     warning: boolean;
   };
@@ -47,7 +48,7 @@ function ProcessNode({ data }: NodeProps) {
       <small>{typed.stage}</small>
       <strong>{typed.label}</strong>
       <span>{typed.actual.toFixed(1)} / {typed.capacity.toFixed(1)} t/h stage</span>
-      <span>{typed.load.toFixed(1)}% load · {typed.energy.toFixed(1)} kWh/t cement</span>
+      <span>{typed.load.toFixed(1)}% load · {typed.energy.toFixed(1)} kWh/t {typed.outputProduct}</span>
       <Handle type="source" position={Position.Right} />
     </div>
   );
@@ -143,6 +144,19 @@ export function App() {
   }, [blendId, routeId, target, routes]);
 
   const route = routes.find((item) => item.route_id === routeId);
+  const selectedBlend = blends.find((item) => item.blend_id === blendId);
+  const selectedCostBook = costBooks.find((item) => item.cost_book_id === costBookId);
+  const effectiveElectricityTariff = selectedCostBook?.electricity_inr_kwh ?? electricityTariff;
+  const effectiveThermalTariff = selectedCostBook?.thermal_fuel_inr_mkcal ?? thermalTariff;
+  const selectedOutputProduct = route?.route_kind === "clinker_only"
+    ? "CLINKER"
+    : selectedBlend?.blend_class === "raw_meal"
+      ? "RAW MEAL"
+      : selectedBlend?.blend_class === "raw_material_stockpile"
+        ? "RAW MATERIAL"
+        : selectedBlend?.blend_class === "premix"
+          ? "PREMIX"
+          : "CEMENT";
   const machineMap = useMemo(() => new Map(machines.map((machine) => [machine.machine_id, machine])), [machines]);
   const metricMap = useMemo(() => new Map(result?.machine_metrics.map((metric) => [metric.machine_id, metric]) ?? []), [result]);
   const active = new Set(result?.events.slice(0, visible).map((event) => event.component) ?? []);
@@ -161,6 +175,7 @@ export function App() {
         capacity: metric?.effective_capacity_tph ?? (machine ? machine.rated_capacity_tph * machine.availability : 0),
         load: metric?.load_percent ?? 0,
         energy: metric?.electricity_kwh_t_cement ?? 0,
+        outputProduct: (result?.output_product ?? selectedOutputProduct).toLowerCase(),
         active: active.has(node.machine_id),
         warning: result?.bottleneck_machine_id === node.machine_id,
       },
@@ -173,7 +188,7 @@ export function App() {
     return {
       blend_id: blendId, route_id: routeId, cost_book_id: costBookId || null,
       target_output_tph: target, duration_hours: duration,
-      electricity_inr_kwh: electricityTariff, thermal_fuel_inr_mkcal: thermalTariff,
+      electricity_inr_kwh: effectiveElectricityTariff, thermal_fuel_inr_mkcal: effectiveThermalTariff,
       raw_meal_to_clinker_yield: rawMealYield, auto_mass_conversion: autoMassConversion,
       chemistry_scenario: chemistryScenario, target_blaine_m2_kg: targetBlaine || null,
       fuel_material_id: fuelMaterialId || null, fuel_rate_kg_t_clinker: optionalNumber(fuelRate),
@@ -243,8 +258,8 @@ export function App() {
           <section className="config">
             <label>BLEND<select value={blendId} onChange={(event) => setBlendId(event.target.value)}>{blends.map((blend) => <option value={blend.blend_id} key={blend.blend_id}>{blend.name} · {pretty(blend.blend_class)}</option>)}</select></label>
             <label>ROUTE<select value={routeId} onChange={(event) => setRouteId(event.target.value)}>{routes.map((item) => <option value={item.route_id} key={item.route_id}>{item.name} · {pretty(item.route_kind)}</option>)}</select></label>
-            <label>COST BOOK<select value={costBookId} onChange={(event) => { const id = event.target.value; setCostBookId(id); const book = costBooks.find((item) => item.cost_book_id === id); if (book?.electricity_inr_kwh !== null && book?.electricity_inr_kwh !== undefined) setElectricityTariff(book.electricity_inr_kwh); if (book?.thermal_fuel_inr_mkcal !== null && book?.thermal_fuel_inr_mkcal !== undefined) setThermalTariff(book.thermal_fuel_inr_mkcal); }}><option value="">No cost book — legacy fallback</option>{costBooks.map((item) => <option value={item.cost_book_id} key={item.cost_book_id}>{item.name} · v{item.version}</option>)}</select></label>
-            <label>TARGET T/H CEMENT<input type="number" min="0.1" value={target} onChange={(event) => setTarget(Number(event.target.value))} /></label>
+            <label>COST BOOK<select value={costBookId} onChange={(event) => setCostBookId(event.target.value)}><option value="">No cost book — use run tariffs</option>{costBooks.map((item) => <option value={item.cost_book_id} key={item.cost_book_id}>{item.name} · v{item.version}</option>)}</select></label>
+            <label>TARGET T/H {selectedOutputProduct}<input type="number" min="0.1" value={target} onChange={(event) => setTarget(Number(event.target.value))} /></label>
             <button className="run" disabled={!blendId || !routeId} onClick={() => void run().catch((caught) => setError(String(caught)))}>RUN SIMULATION</button>
             <button disabled={!blendId || !routeId} onClick={() => void runVariability().catch((caught) => setError(String(caught)))}>RUN LOW / TYPICAL / HIGH</button>
           </section>
@@ -254,13 +269,14 @@ export function App() {
             <summary>RUN BASIS / TARIFFS / MASS-CONVERSION ASSUMPTIONS</summary>
             <div className="basis-grid">
               <label>DURATION HOURS<input type="number" min="0.1" value={duration} onChange={(event) => setDuration(Number(event.target.value))} /></label>
-              <label>ELECTRICITY ₹/KWH<input type="number" min="0" step="0.1" value={electricityTariff} onChange={(event) => setElectricityTariff(Number(event.target.value))} /></label>
-              <label>THERMAL FUEL ₹/MILLION KCAL<input type="number" min="0" value={thermalTariff} onChange={(event) => setThermalTariff(Number(event.target.value))} /></label>
+              <label>ELECTRICITY ₹/KWH {selectedCostBook?.electricity_inr_kwh !== null && selectedCostBook?.electricity_inr_kwh !== undefined ? "· COST BOOK" : "· RUN INPUT"}<input type="number" min="0" step="0.1" value={effectiveElectricityTariff} disabled={selectedCostBook?.electricity_inr_kwh !== null && selectedCostBook?.electricity_inr_kwh !== undefined} onChange={(event) => setElectricityTariff(Number(event.target.value))} /></label>
+              <label>THERMAL FUEL ₹/MILLION KCAL {selectedCostBook?.thermal_fuel_inr_mkcal !== null && selectedCostBook?.thermal_fuel_inr_mkcal !== undefined ? "· COST BOOK" : "· RUN INPUT"}<input type="number" min="0" value={effectiveThermalTariff} disabled={selectedCostBook?.thermal_fuel_inr_mkcal !== null && selectedCostBook?.thermal_fuel_inr_mkcal !== undefined} onChange={(event) => setThermalTariff(Number(event.target.value))} /></label>
               <label>RAW MEAL → CLINKER YIELD<input type="number" min="0.3" max="1" step="0.01" value={rawMealYield} onChange={(event) => setRawMealYield(Number(event.target.value))} /></label>
               <label>CHEMISTRY SCENARIO<select value={chemistryScenario} onChange={(event) => setChemistryScenario(event.target.value as "low" | "typical" | "high")}><option value="low">Low profile</option><option value="typical">Typical</option><option value="high">High profile</option></select></label>
               <label>TARGET BLAINE M²/KG<input type="number" min="1" value={targetBlaine} onChange={(event) => setTargetBlaine(Number(event.target.value))} /></label>
               <label className="check-line"><input type="checkbox" checked={autoMassConversion} onChange={(event) => setAutoMassConversion(event.target.checked)} /> AUTO YIELD FROM RAW-MEAL LOI</label>
             </div>
+            {selectedCostBook && <p className="note">Selected cost-book tariffs are authoritative and locked above. A blank tariff in the cost book falls back to the editable run input. Deselect the cost book to use run tariffs for both fields.</p>}
           </details>
           <details className="basis-panel"><summary>KILN / FUEL-ASH OPERATING ENVELOPE</summary><div className="basis-grid"><label>FUEL MATERIAL<select value={fuelMaterialId} onChange={(event) => setFuelMaterialId(event.target.value)}><option value="">No fuel-ash model</option>{materials.filter((item) => ["fuel", "alternative_fuel"].includes(item.functional_role)).map((item) => <option value={item.material_id} key={item.material_id}>{item.name}</option>)}</select></label><label>FUEL RATE KG/T CLINKER<input type="number" value={fuelRate} onChange={(event) => setFuelRate(event.target.value)} /></label><label>KILN FEED MOISTURE %<input type="number" value={kilnMoisture} onChange={(event) => setKilnMoisture(event.target.value)} /></label><label>KILN O₂ %<input type="number" value={kilnOxygen} onChange={(event) => setKilnOxygen(event.target.value)} /></label><label>KILN TEMPERATURE °C<input type="number" value={kilnTemperature} onChange={(event) => setKilnTemperature(event.target.value)} /></label><label>MEASURED FREE LIME %<input type="number" value={freeLime} onChange={(event) => setFreeLime(event.target.value)} /></label></div></details>
           <details className="basis-panel"><summary>OPC 43 MEASURED PRODUCTION GATE</summary><p className="note">Leave untested values blank. The gate will remain REVIEW; it never predicts strength from oxide chemistry.</p><div className="basis-grid">{Object.entries(quality).map(([key, value]) => <label key={key}>{pretty(key)}<input type="number" value={value} onChange={(event) => setQuality((current) => ({ ...current, [key]: event.target.value }))} /></label>)}</div></details>
@@ -300,26 +316,33 @@ export function App() {
 }
 
 function ResultSummary({ result }: { result: Result }) {
+  const valid = result.run_status === "completed";
+  const product = result.output_product.toUpperCase();
   const metrics = [
-    ["TARGET OUTPUT", number(result.request.target_output_tph, " t/h")],
-    ["ACHIEVED OUTPUT", number(result.achievable_output_tph, " t/h")],
+    [`TARGET ${product}`, number(result.request.target_output_tph, " t/h")],
+    [`ACHIEVED ${product}`, valid ? number(result.achievable_output_tph, " t/h") : "BLOCKED"],
     ["BOTTLENECK", result.bottleneck_machine_name ?? "Unknown"],
-    ["ELECTRICITY", number(result.electricity_kwh_t, " kWh/t")],
-    ["THERMAL", number(result.thermal_kcal_kg, " kcal/kg")],
-    ["DIRECT MODEL COST", money(result.direct_model_cost_inr_t)],
-    ["PLANT CASH COST", money(result.cost_breakdown?.plant_cash_cost_inr_t ?? null)],
-    ["FULL COST", money(result.cost_breakdown?.full_cost_inr_t ?? null)],
-    ["MATERIAL CO₂", number(result.estimated_co2_kg_t, " kg/t", 0)],
-    ["RUN OUTPUT", number(result.total_output_tonnes, " t", 0)],
+    ["ELECTRICITY", valid ? number(result.electricity_kwh_t, " kWh/t") : "N/A — BLOCKED"],
+    ["THERMAL", valid ? number(result.thermal_kcal_kg, " kcal/kg") : "N/A — BLOCKED"],
+    ["DIRECT MODEL COST", valid ? money(result.direct_model_cost_inr_t) : "N/A — BLOCKED"],
+    ["PLANT CASH COST", valid ? money(result.cost_breakdown?.plant_cash_cost_inr_t ?? null) : "N/A — BLOCKED"],
+    ["FULL COST", valid ? money(result.cost_breakdown?.full_cost_inr_t ?? null) : "N/A — BLOCKED"],
+    ["MATERIAL CO₂", valid ? number(result.estimated_co2_kg_t, " kg/t", 0) : "N/A — BLOCKED"],
+    ["RUN OUTPUT", valid ? number(result.total_output_tonnes, " t", 0) : "0 t — BLOCKED"],
+    ["MATERIAL INPUT", valid ? number(result.total_material_input_tonnes, " t", 0) : "0 t — BLOCKED"],
   ];
   return (
-    <section className="result-summary" aria-label="Simulation result summary">
-      {metrics.map(([label, value]) => <div key={label}><small>{label}</small><strong>{value}</strong></div>)}
-    </section>
+    <>
+      {!valid && <div className="err">RUN BLOCKED — resolve every BLOCK validation before treating output, energy or cost as a production result.</div>}
+      <section className="result-summary" aria-label="Simulation result summary">
+        {metrics.map(([label, value]) => <div key={label}><small>{label}</small><strong>{value}</strong></div>)}
+      </section>
+    </>
   );
 }
 
 function RunReport({ result }: { result: Result }) {
+  const valid = result.run_status === "completed";
   return (
     <section className="run-report">
       <div className="report-heading">
@@ -336,17 +359,17 @@ function RunReport({ result }: { result: Result }) {
 
       <div className="report-grid">
         <details open><summary>WEIGHTED CHEMISTRY / MASS %</summary><div className="chemistry-grid">{Object.entries(result.chemistry).map(([oxide, value]) => <div key={oxide}><small>{oxide.toUpperCase()}</small><strong>{value === null ? "UNKNOWN" : `${value.toFixed(3)}%`}</strong></div>)}</div><div className="moduli"><span>LSF {result.lsf === null ? "N/A — raw meal only or chemistry incomplete" : result.lsf.toFixed(2)}</span><span>SM {result.silica_modulus?.toFixed(3) ?? "N/A"}</span><span>AM {result.alumina_modulus?.toFixed(3) ?? "N/A"}</span></div></details>
-        <details open><summary>COST / INCLUDED AND EXCLUDED</summary>{result.cost_breakdown && <div className="key-values"><span>Materials</span><strong>{money(result.cost_breakdown.materials_inr_t)}</strong><span>Electricity</span><strong>{money(result.cost_breakdown.electricity_inr_t)}</strong><span>Thermal fuel</span><strong>{money(result.cost_breakdown.thermal_inr_t)}</strong><span>Direct model total</span><strong>{money(result.cost_breakdown.direct_model_cost_inr_t)}</strong><span>Packing</span><strong>{money(result.cost_breakdown.packing_inr_t)}</strong><span>Labour</span><strong>{money(result.cost_breakdown.labour_inr_t)}</strong><span>Maintenance</span><strong>{money(result.cost_breakdown.maintenance_inr_t)}</strong><span>Other variable</span><strong>{money(result.cost_breakdown.other_variable_inr_t)}</strong><span>Plant cash cost</span><strong>{money(result.cost_breakdown.plant_cash_cost_inr_t)}</strong><span>Factory overhead</span><strong>{money(result.cost_breakdown.factory_overhead_inr_t)}</strong><span>Outbound logistics</span><strong>{money(result.cost_breakdown.outbound_logistics_inr_t)}</strong><span>Full cost estimate</span><strong>{money(result.cost_breakdown.full_cost_inr_t)}</strong></div>}<p className="note">Cost book: {result.cost_breakdown?.cost_book_name ?? "none"}. Excludes: {result.cost_breakdown?.excluded_costs.join(", ")}</p></details>
-        <details open><summary>ENERGY / RUN TOTALS</summary>{result.energy_breakdown && <div className="key-values"><span>Electricity intensity</span><strong>{number(result.energy_breakdown.electricity_kwh_t, " kWh/t")}</strong><span>Thermal intensity</span><strong>{number(result.energy_breakdown.thermal_kcal_kg, " kcal/kg")}</strong><span>Total electricity</span><strong>{number(result.energy_breakdown.total_electricity_mwh, " MWh")}</strong><span>Total thermal energy</span><strong>{number(result.energy_breakdown.total_thermal_gcal, " Gcal")}</strong></div>}</details>
-        <details open><summary>CARBON / MATERIAL SCOPE</summary>{result.carbon_breakdown && <div className="key-values"><span>Material CO₂ intensity</span><strong>{number(result.carbon_breakdown.materials_kg_co2_t, " kg/t", 1)}</strong><span>Run material output</span><strong>{number(result.carbon_breakdown.total_materials_tonnes, " t", 1)}</strong><span>Total material CO₂</span><strong>{result.carbon_breakdown.total_materials_kg_co2 === null ? "N/A" : number(result.carbon_breakdown.total_materials_kg_co2 / 1000, " t CO₂", 1)}</strong></div>}<p className="note">Excludes: {result.carbon_breakdown?.exclusions.join(", ")}</p></details>
+        <details open><summary>COST / INCLUDED AND EXCLUDED</summary>{!valid ? <p className="note">N/A — this run is BLOCKED. Resolve the blocking validation and rerun before using cost results.</p> : result.cost_breakdown && <div className="key-values"><span>Materials</span><strong>{money(result.cost_breakdown.materials_inr_t)}</strong><span>Electricity</span><strong>{money(result.cost_breakdown.electricity_inr_t)}</strong><span>Thermal fuel</span><strong>{money(result.cost_breakdown.thermal_inr_t)}</strong><span>Applied electricity tariff</span><strong>{result.applied_electricity_inr_kwh === null ? "N/A — legacy run" : `₹${result.applied_electricity_inr_kwh.toFixed(2)}/kWh · ${result.electricity_tariff_source}`}</strong><span>Applied thermal tariff</span><strong>{result.applied_thermal_fuel_inr_mkcal === null ? "N/A — legacy run" : `₹${result.applied_thermal_fuel_inr_mkcal.toFixed(2)}/million kcal · ${result.thermal_tariff_source}`}</strong><span>Direct model total</span><strong>{money(result.cost_breakdown.direct_model_cost_inr_t)}</strong><span>Packing</span><strong>{money(result.cost_breakdown.packing_inr_t)}</strong><span>Labour</span><strong>{money(result.cost_breakdown.labour_inr_t)}</strong><span>Maintenance</span><strong>{money(result.cost_breakdown.maintenance_inr_t)}</strong><span>Other variable</span><strong>{money(result.cost_breakdown.other_variable_inr_t)}</strong><span>Plant cash cost</span><strong>{money(result.cost_breakdown.plant_cash_cost_inr_t)}</strong><span>Factory overhead</span><strong>{money(result.cost_breakdown.factory_overhead_inr_t)}</strong><span>Outbound logistics</span><strong>{money(result.cost_breakdown.outbound_logistics_inr_t)}</strong><span>Full cost estimate</span><strong>{money(result.cost_breakdown.full_cost_inr_t)}</strong></div>}{valid && <p className="note">Cost book: {result.cost_breakdown?.cost_book_name ?? "none"}. Excludes: {result.cost_breakdown?.excluded_costs.join(", ")}</p>}</details>
+        <details open><summary>ENERGY / RUN TOTALS</summary>{!valid ? <p className="note">N/A — this run is BLOCKED. Stored design intensities are not published as achieved production energy.</p> : result.energy_breakdown && <div className="key-values"><span>Electricity intensity</span><strong>{number(result.energy_breakdown.electricity_kwh_t, ` kWh/t ${result.output_product}`)}</strong><span>Thermal intensity</span><strong>{number(result.energy_breakdown.thermal_kcal_kg, ` kcal/kg ${result.output_product}`)}</strong><span>Total electricity</span><strong>{number(result.energy_breakdown.total_electricity_mwh, " MWh")}</strong><span>Total thermal energy</span><strong>{number(result.energy_breakdown.total_thermal_gcal, " Gcal")}</strong></div>}</details>
+        <details open><summary>CARBON / MATERIAL SCOPE</summary>{!valid ? <p className="note">N/A — this run is BLOCKED. No achieved-production carbon headline is published.</p> : result.carbon_breakdown && <div className="key-values"><span>Material CO₂ intensity</span><strong>{number(result.carbon_breakdown.materials_kg_co2_t, ` kg/t ${result.output_product}`, 1)}</strong><span>Total material input</span><strong>{number(result.carbon_breakdown.total_materials_tonnes, " t", 1)}</strong><span>Total material CO₂</span><strong>{result.carbon_breakdown.total_materials_kg_co2 === null ? "N/A" : number(result.carbon_breakdown.total_materials_kg_co2 / 1000, " t CO₂", 1)}</strong></div>}{valid && <p className="note">Excludes: {result.carbon_breakdown?.exclusions.join(", ")}</p>}</details>
         <details open><summary>ROUTE / WHY THIS PATH</summary>{result.route_analysis ? <><div className="key-values"><span>Route kind</span><strong>{pretty(result.route_analysis.route_kind)}</strong><span>Compatibility</span><strong>{result.route_analysis.compatibility_score.toFixed(0)}/100</strong><span>Predicted route capacity</span><strong>{number(result.route_analysis.predicted_output_tph, " t/h")}</strong><span>Route bottleneck</span><strong>{result.route_analysis.bottleneck_machine_name ?? "N/A"}</strong></div><p className="note">{result.route_analysis.description}<br />{result.route_analysis.flow_summary}<br />{result.route_analysis.reasons.join(" · ")}</p></> : <p className="note">Legacy run: route analysis was not stored by this calculation version.</p>}</details>
         <details open><summary>PRODUCTION QUALITY GATE</summary>{result.quality_gate ? <><div className="key-values"><span>Gate</span><strong>{result.quality_gate.standard}</strong><span>Status</span><strong>{result.quality_gate.status.toUpperCase()}</strong>{result.quality_gate.checks.flatMap((check) => [<span key={`${check.metric}-label`}>{pretty(check.metric)} · {check.requirement}</span>, <strong key={`${check.metric}-value`}>{check.measured === null ? "NOT TESTED" : `${check.measured} · ${check.status.toUpperCase()}`}</strong>])}</div><p className="note">{result.quality_gate.note}</p></> : <p className="note">This recipe is not being screened as an OPC 43 finished-cement candidate.</p>}</details>
         <details><summary>UNCERTAINTY / PROCESS CORRECTIONS</summary><div className="key-values"><span>Chemistry scenario</span><strong>{pretty(result.chemistry_scenario)}</strong><span>LOI-derived raw-meal yield</span><strong>{result.derived_raw_meal_to_clinker_yield?.toFixed(4) ?? "N/A"}</strong><span>Grinding capacity factor</span><strong>{result.grinding_capacity_factor.toFixed(4)}</strong><span>Grinding energy factor</span><strong>{result.grinding_energy_factor.toFixed(4)}</strong><span>Fuel ash addition</span><strong>{result.fuel_ash_contribution_kg_t_clinker === null ? "N/A" : `${result.fuel_ash_contribution_kg_t_clinker.toFixed(2)} kg/t clinker`}</strong></div></details>
       </div>
 
-      <details open><summary>MACHINE CAPACITY AND ENERGY BREAKDOWN</summary><div className="table-responsive"><table><thead><tr><th>Machine / immutable version</th><th>Stage</th><th>Actual stage t/h</th><th>Effective stage cap.</th><th>Cement-eq. cap.</th><th>Load</th><th>kWh/t cement</th><th>kcal/kg cement</th></tr></thead><tbody>{result.machine_metrics.map((item) => { const snapshot = result.machine_snapshots.find((machine) => machine.machine_id === item.machine_id); return <tr key={item.node_id}><td>{item.machine_name} · {item.machine_id} · v{snapshot?.version ?? "?"}</td><td>{pretty(item.process_stage)}</td><td>{item.actual_throughput_tph.toFixed(2)}</td><td>{item.effective_capacity_tph.toFixed(2)}</td><td>{item.cement_equivalent_capacity_tph?.toFixed(2) ?? "N/A"}</td><td>{item.load_percent.toFixed(1)}%</td><td>{item.electricity_kwh_t_cement.toFixed(2)}</td><td>{item.thermal_kcal_kg_cement.toFixed(2)}</td></tr>; })}</tbody></table></div></details>
+      <details open><summary>MACHINE CAPACITY AND ENERGY BREAKDOWN</summary><div className="table-responsive"><table><thead><tr><th>Machine / immutable version</th><th>Stage</th><th>Target-required t/h</th><th>Target load</th><th>Achieved stage t/h</th><th>Achieved load</th><th>Effective stage cap.</th><th>{pretty(result.output_product)}-eq. cap.</th><th>kWh/t {result.output_product}</th><th>kcal/kg {result.output_product}</th></tr></thead><tbody>{result.machine_metrics.map((item) => { const snapshot = result.machine_snapshots.find((machine) => machine.machine_id === item.machine_id); return <tr key={item.node_id}><td>{item.machine_name} · {item.machine_id} · v{snapshot?.version ?? "?"}</td><td>{pretty(item.process_stage)}</td><td>{item.target_throughput_tph.toFixed(2)}</td><td>{item.target_load_percent.toFixed(1)}%</td><td>{item.actual_throughput_tph.toFixed(2)}</td><td>{item.load_percent.toFixed(1)}%</td><td>{item.effective_capacity_tph.toFixed(2)}</td><td>{item.cement_equivalent_capacity_tph?.toFixed(2) ?? "N/A"}</td><td>{result.run_status === "blocked" ? "N/A" : item.electricity_kwh_t_cement.toFixed(2)}</td><td>{result.run_status === "blocked" ? "N/A" : item.thermal_kcal_kg_cement.toFixed(2)}</td></tr>; })}</tbody></table></div></details>
 
-      <details><summary>MATERIAL MASS / COST / CARBON BREAKDOWN</summary><div className="table-responsive"><table><thead><tr><th>Material / immutable version</th><th>Mass %</th><th>t/h</th><th>t/run</th><th>Applied ₹/t material</th><th>₹/t cement</th><th>Cost basis</th><th>kg CO₂/t cement</th><th>Evidence</th></tr></thead><tbody>{result.material_metrics.map((item) => { const snapshot = result.material_snapshots.find((material) => material.material_id === item.material_id); return <tr key={item.material_id}><td>{item.material_name} · {item.material_id} · v{snapshot?.version ?? "?"}</td><td>{item.percentage.toFixed(3)}</td><td>{item.tonnes_per_hour.toFixed(2)}</td><td>{item.tonnes_per_run.toFixed(1)}</td><td>{item.applied_unit_cost_inr_t?.toFixed(0) ?? "N/A"}</td><td>{item.cost_inr_t_cement?.toFixed(0) ?? "N/A"}</td><td>{item.cost_basis}</td><td>{item.co2_kg_t_cement?.toFixed(1) ?? "N/A"}</td><td>{item.evidence_class}</td></tr>; })}</tbody></table></div></details>
+      <details><summary>MATERIAL MASS / COST / CARBON BREAKDOWN</summary><div className="table-responsive"><table><thead><tr><th>Material / immutable version</th><th>Input mass %</th><th>t input/t {result.output_product}</th><th>t/h input</th><th>t/run input</th><th>Applied ₹/t material</th><th>₹/t {result.output_product}</th><th>Cost basis</th><th>kg CO₂/t {result.output_product}</th><th>Evidence</th></tr></thead><tbody>{result.material_metrics.map((item) => { const snapshot = result.material_snapshots.find((material) => material.material_id === item.material_id); return <tr key={item.material_id}><td>{item.material_name} · {item.material_id} · v{snapshot?.version ?? "?"}</td><td>{item.percentage.toFixed(3)}</td><td>{item.tonnes_per_t_output?.toFixed(4) ?? "N/A — legacy"}</td><td>{item.tonnes_per_hour.toFixed(2)}</td><td>{item.tonnes_per_run.toFixed(1)}</td><td>{item.applied_unit_cost_inr_t?.toFixed(0) ?? "N/A"}</td><td>{valid ? item.cost_inr_t_cement?.toFixed(0) ?? "N/A" : "N/A"}</td><td>{item.cost_basis}</td><td>{valid ? item.co2_kg_t_cement?.toFixed(1) ?? "N/A" : "N/A"}</td><td>{item.evidence_class}</td></tr>; })}</tbody></table></div></details>
 
       <div className="report-grid">
         <details><summary>ASSUMPTION REGISTER</summary><div className="audit-list">{result.assumptions.map((item) => <p key={item.key}><code>{item.key}</code><strong>{item.value}</strong><span>{item.basis}</span></p>)}</div></details>
@@ -366,8 +389,8 @@ function RunLibrary({ runs, openRun }: { runs: Result[]; openRun: (run: Result) 
     <section className="library run-library">
       <div className="title">IMMUTABLE RUN LIBRARY / {runs.length} AUDIT RECORDS</div>
       {runs.length === 0 && <div className="empty-state">No saved runs yet. Every completed simulation will appear here.</div>}
-      {runs.map((run) => <div className="run-row" key={run.run_id}><input aria-label={`Compare ${run.run_id}`} type="checkbox" checked={selected.includes(run.run_id)} onChange={() => toggle(run.run_id)} /><code>{run.run_id}</code><span>{run.blend_snapshot?.name ?? run.request.blend_id}<small>{run.route_snapshot?.name ?? run.request.route_id} · {new Date(run.created_at).toLocaleString()}</small></span><span>{run.achievable_output_tph.toFixed(1)} t/h<small>{money(run.direct_model_cost_inr_t)} · {number(run.estimated_co2_kg_t, " kg CO₂/t", 0)}</small></span><button onClick={() => openRun(run)}>OPEN</button></div>)}
-      {compared.length > 0 && <div className="comparison"><div className="title">SIDE-BY-SIDE COMPARISON / {compared.length} RUNS</div><div className="table-responsive"><table><thead><tr><th>Run</th><th>Blend</th><th>Route</th><th>Output t/h</th><th>Bottleneck</th><th>kWh/t</th><th>kcal/kg</th><th>Direct ₹/t</th><th>CO₂ kg/t</th><th>Warnings</th></tr></thead><tbody>{compared.map((run) => <tr key={run.run_id}><td>{run.run_id.slice(-8)}</td><td>{run.blend_snapshot?.name ?? run.request.blend_id}</td><td>{run.route_snapshot?.name ?? run.request.route_id}</td><td>{run.achievable_output_tph.toFixed(1)}</td><td>{run.bottleneck_machine_name ?? "Unknown"}</td><td>{run.electricity_kwh_t.toFixed(1)}</td><td>{run.thermal_kcal_kg.toFixed(1)}</td><td>{run.direct_model_cost_inr_t?.toFixed(0) ?? "N/A"}</td><td>{run.estimated_co2_kg_t?.toFixed(0) ?? "N/A"}</td><td>{run.warnings.length}</td></tr>)}</tbody></table></div></div>}
+      {runs.map((run) => <div className="run-row" key={run.run_id}><input aria-label={`Compare ${run.run_id}`} type="checkbox" checked={selected.includes(run.run_id)} onChange={() => toggle(run.run_id)} /><code>{run.run_id}</code><span>{run.blend_snapshot?.name ?? run.request.blend_id}<small>{run.route_snapshot?.name ?? run.request.route_id} · {new Date(run.created_at).toLocaleString()}</small></span><span>{run.run_status === "blocked" ? "BLOCKED" : `${run.achievable_output_tph.toFixed(1)} t/h ${run.output_product}`}<small>{run.run_status === "blocked" ? "No valid production result" : `${money(run.direct_model_cost_inr_t)} · ${number(run.estimated_co2_kg_t, " kg CO₂/t", 0)}`}</small></span><button onClick={() => openRun(run)}>OPEN</button></div>)}
+      {compared.length > 0 && <div className="comparison"><div className="title">SIDE-BY-SIDE COMPARISON / {compared.length} RUNS</div><div className="table-responsive"><table><thead><tr><th>Run</th><th>Status</th><th>Blend</th><th>Route</th><th>Output t/h</th><th>Bottleneck</th><th>kWh/t</th><th>kcal/kg</th><th>Direct ₹/t</th><th>CO₂ kg/t</th><th>Warnings</th></tr></thead><tbody>{compared.map((run) => <tr key={run.run_id}><td>{run.run_id.slice(-8)}</td><td>{run.run_status.toUpperCase()}</td><td>{run.blend_snapshot?.name ?? run.request.blend_id}</td><td>{run.route_snapshot?.name ?? run.request.route_id}</td><td>{run.run_status === "blocked" ? "N/A" : run.achievable_output_tph.toFixed(1)}</td><td>{run.bottleneck_machine_name ?? "Unknown"}</td><td>{run.run_status === "blocked" ? "N/A" : run.electricity_kwh_t.toFixed(1)}</td><td>{run.run_status === "blocked" ? "N/A" : run.thermal_kcal_kg.toFixed(1)}</td><td>{run.run_status === "blocked" ? "N/A" : run.direct_model_cost_inr_t?.toFixed(0) ?? "N/A"}</td><td>{run.run_status === "blocked" ? "N/A" : run.estimated_co2_kg_t?.toFixed(0) ?? "N/A"}</td><td>{run.warnings.length}</td></tr>)}</tbody></table></div></div>}
     </section>
   );
 }

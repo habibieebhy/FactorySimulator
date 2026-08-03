@@ -48,7 +48,7 @@ def create_app(path: str | Path | None = None) -> FastAPI:
     repo = Repository(path)
     seed(repo)
     engine = Engine(repo)
-    app = FastAPI(title="BRIXTA Cement Twin API", version="0.5.0")
+    app = FastAPI(title="BRIXTA Cement Twin API", version="0.5.2")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -89,7 +89,7 @@ def create_app(path: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "service": "brixta-cement-twin-api", "version": "0.5.0"}
+        return {"status": "ok", "service": "brixta-cement-twin-api", "version": "0.5.2"}
 
     @app.get("/api/materials", response_model=list[Material])
     def materials(include_archived: bool = Query(False)) -> list[BaseModel]:
@@ -391,10 +391,13 @@ def create_app(path: str | Path | None = None) -> FastAPI:
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow(["section", "item", "value", "unit_or_detail"])
+        product = result.output_product
+        valid_value = lambda value: value if result.run_status == "completed" else None
         rows = [
             ("run", "run_id", result.run_id, ""),
             ("run", "created_at", result.created_at.isoformat(), "UTC"),
             ("run", "calculation_version", result.calculation_version, ""),
+            ("run", "status", result.run_status, ""),
             ("configuration", "blend", result.blend_snapshot.name if result.blend_snapshot else result.request.blend_id, ""),
             ("configuration", "route", result.route_snapshot.name if result.route_snapshot else result.request.route_id, ""),
             ("configuration", "route_kind", result.route_analysis.route_kind if result.route_analysis else "legacy", ""),
@@ -402,17 +405,23 @@ def create_app(path: str | Path | None = None) -> FastAPI:
             ("configuration", "route_compatibility_score", result.route_analysis.compatibility_score if result.route_analysis else None, "0-100"),
             ("configuration", "cost_book", result.cost_book_snapshot.name if result.cost_book_snapshot else "none", ""),
             ("configuration", "chemistry_scenario", result.chemistry_scenario, "low/typical/high"),
-            ("output", "target", result.request.target_output_tph, "t/h cement"),
-            ("output", "achieved", result.achievable_output_tph, "t/h cement"),
-            ("output", "bottleneck", result.bottleneck_machine_name or "unknown", f"{result.bottleneck_tph:.3f} t/h cement-equivalent"),
-            ("energy", "electricity", result.electricity_kwh_t, "kWh/t cement"),
-            ("energy", "thermal", result.thermal_kcal_kg, "kcal/kg cement"),
-            ("cost", "materials", result.material_cost_inr_t, "INR/t cement"),
-            ("cost", "energy", result.energy_cost_inr_t, "INR/t cement"),
-            ("cost", "direct_model_total", result.direct_model_cost_inr_t, "INR/t cement"),
-            ("cost", "plant_cash_cost", result.cost_breakdown.plant_cash_cost_inr_t if result.cost_breakdown else None, "INR/t cement"),
-            ("cost", "full_cost", result.cost_breakdown.full_cost_inr_t if result.cost_breakdown else None, "INR/t cement"),
-            ("carbon", "materials", result.estimated_co2_kg_t, "kg CO2/t cement"),
+            ("output", "product", product, ""),
+            ("output", "target", result.request.target_output_tph, f"t/h {product}"),
+            ("output", "achieved", valid_value(result.achievable_output_tph), f"t/h {product}"),
+            ("material_input", "factor", valid_value(result.material_input_t_per_t_output), f"t input/t {product}"),
+            ("material_input", "rate", valid_value(result.total_material_input_tph), "t/h input materials"),
+            ("material_input", "run_total", valid_value(result.total_material_input_tonnes), "t input materials/run"),
+            ("output", "bottleneck", result.bottleneck_machine_name or "unknown", f"{result.bottleneck_tph:.3f} t/h {product}"),
+            ("energy", "electricity", valid_value(result.electricity_kwh_t), f"kWh/t {product}"),
+            ("energy", "thermal", valid_value(result.thermal_kcal_kg), f"kcal/kg {product}"),
+            ("cost", "materials", valid_value(result.material_cost_inr_t), f"INR/t {product}"),
+            ("tariff", "electricity_applied", result.applied_electricity_inr_kwh, f"INR/kWh; {result.electricity_tariff_source}"),
+            ("tariff", "thermal_applied", result.applied_thermal_fuel_inr_mkcal, f"INR/million kcal; {result.thermal_tariff_source}"),
+            ("cost", "energy", valid_value(result.energy_cost_inr_t), f"INR/t {product}"),
+            ("cost", "direct_model_total", valid_value(result.direct_model_cost_inr_t), f"INR/t {product}"),
+            ("cost", "plant_cash_cost", valid_value(result.cost_breakdown.plant_cash_cost_inr_t) if result.cost_breakdown else None, f"INR/t {product}"),
+            ("cost", "full_cost", valid_value(result.cost_breakdown.full_cost_inr_t) if result.cost_breakdown else None, f"INR/t {product}"),
+            ("carbon", "materials", valid_value(result.estimated_co2_kg_t), f"kg CO2/t {product}"),
             ("mass_conversion", "derived_raw_meal_to_clinker_yield", result.derived_raw_meal_to_clinker_yield, "fraction"),
             ("process_correction", "grinding_capacity_factor", result.grinding_capacity_factor, "multiplier"),
             ("process_correction", "grinding_energy_factor", result.grinding_energy_factor, "multiplier"),
@@ -421,9 +430,14 @@ def create_app(path: str | Path | None = None) -> FastAPI:
         ]
         writer.writerows(rows)
         for item in result.material_metrics:
-            writer.writerow(["material", item.material_name, item.percentage, f"mass percent; {item.cost_basis}; unit cost={item.applied_unit_cost_inr_t}"])
+            writer.writerow(["material_percent", item.material_name, item.percentage, "mass percent of input blend"])
+            writer.writerow(["material_per_output", item.material_name, item.tonnes_per_t_output, f"t input/t {product}"])
+            writer.writerow(["material_rate", item.material_name, valid_value(item.tonnes_per_hour), "t/h input material"])
+            writer.writerow(["material_run_total", item.material_name, valid_value(item.tonnes_per_run), f"t/{result.request.duration_hours:g} h run"])
+            writer.writerow(["material_cost", item.material_name, valid_value(item.cost_inr_t_cement), f"INR/t {product}; {item.cost_basis}; unit cost={item.applied_unit_cost_inr_t}"])
         for item in result.machine_metrics:
             writer.writerow(["machine", item.machine_name, item.load_percent, "load percent"])
+            writer.writerow(["machine_target", item.machine_name, item.target_load_percent, "target-required load percent"])
         for item in result.validation:
             writer.writerow(["validation", item.code, item.severity, item.message])
         if result.route_analysis:

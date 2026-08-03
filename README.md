@@ -6,7 +6,8 @@
 **Document edition:** 1.0 - 2 August 2026  
 **Primary purpose:** controlled cement recipe, process-route and equipment scenario screening  
 **Audience:** founders, plant engineers, cement technologists, research partners, laboratory teams and investment reviewers
-
+python -m uvicorn brixta_twin.app:app --reload --port 8100
+vite: npm run dev INSIDE THE web/
 ---
 
 ## Read this first

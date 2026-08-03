@@ -496,6 +496,8 @@ class MachineRunMetric(BaseModel):
     actual_throughput_tph: float
     effective_capacity_tph: float
     cement_equivalent_capacity_tph: float | None
+    target_throughput_tph: float = 0
+    target_load_percent: float = 0
     load_percent: float
     electricity_kwh_t_cement: float
     thermal_kcal_kg_cement: float
@@ -506,6 +508,7 @@ class MaterialRunMetric(BaseModel):
     material_name: str
     material_type: str
     percentage: float
+    tonnes_per_t_output: float | None = None
     tonnes_per_hour: float
     tonnes_per_run: float
     applied_unit_cost_inr_t: float | None = None
@@ -551,7 +554,9 @@ class RunResult(BaseModel):
     run_id: str
     created_at: datetime
     request: RunRequest
-    calculation_version: str = "0.5.0"
+    calculation_version: str = "0.5.2"
+    run_status: Literal["completed", "blocked"] = "completed"
+    output_product: str = "cement"
     blend_snapshot: Blend | None = None
     route_snapshot: Route | None = None
     cost_book_snapshot: CostBook | None = None
@@ -574,8 +579,15 @@ class RunResult(BaseModel):
     bottleneck_machine_name: str | None = None
     achievable_output_tph: float
     total_output_tonnes: float = 0
+    material_input_t_per_t_output: float | None = None
+    total_material_input_tph: float | None = None
+    total_material_input_tonnes: float | None = None
     electricity_kwh_t: float
     thermal_kcal_kg: float
+    applied_electricity_inr_kwh: float | None = None
+    electricity_tariff_source: str = "legacy run; not recorded"
+    applied_thermal_fuel_inr_mkcal: float | None = None
+    thermal_tariff_source: str = "legacy run; not recorded"
     material_cost_inr_t: float | None
     energy_cost_inr_t: float
     direct_model_cost_inr_t: float | None = None
