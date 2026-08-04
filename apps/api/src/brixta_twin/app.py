@@ -26,6 +26,9 @@ from .models import (
     MaterialCreate,
     RawMixOptimisationRequest,
     RawMixOptimisationResult,
+    PpcToLc3RetrofitRequest,
+    RetrofitStudyResult,
+    SaveRetrofitCandidateRequest,
     Route,
     RouteCreate,
     RouteRecommendationSet,
@@ -34,7 +37,9 @@ from .models import (
     new_id,
     now,
 )
+from .excel_compiler import compile_retrofit_workbook
 from .optimisation import optimise_raw_mix
+from .retrofit import PpcToLc3Designer
 from .routing import recommend_routes
 from .seed import seed
 from .simulation import Engine
@@ -48,7 +53,8 @@ def create_app(path: str | Path | None = None) -> FastAPI:
     repo = Repository(path)
     seed(repo)
     engine = Engine(repo)
-    app = FastAPI(title="BRIXTA Cement Twin API", version="0.7.0")
+    retrofit_designer = PpcToLc3Designer(repo)
+    app = FastAPI(title="BRIXTA Cement Twin API", version="0.8.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -89,7 +95,7 @@ def create_app(path: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "service": "brixta-cement-twin-api", "version": "0.7.0"}
+        return {"status": "ok", "service": "brixta-cement-twin-api", "version": "0.8.0"}
 
     @app.get("/api/materials", response_model=list[Material])
     def materials(include_archived: bool = Query(False)) -> list[BaseModel]:
@@ -276,6 +282,89 @@ def create_app(path: str | Path | None = None) -> FastAPI:
             return optimise_raw_mix(repo, payload)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+
+
+    @app.post("/api/retrofit/ppc-to-lc3/design", response_model=RetrofitStudyResult)
+    def design_ppc_to_lc3(payload: PpcToLc3RetrofitRequest) -> RetrofitStudyResult:
+        try:
+            return retrofit_designer.design(payload)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/retrofit-studies", response_model=list[RetrofitStudyResult])
+    def retrofit_studies() -> list[BaseModel]:
+        return repo.list("retrofit_studies")
+
+    @app.get("/api/retrofit-studies/{study_id}", response_model=RetrofitStudyResult)
+    def get_retrofit_study(study_id: str) -> RetrofitStudyResult:
+        return require("retrofit_studies", study_id, RetrofitStudyResult)
+
+    @app.get("/api/retrofit-studies/{study_id}/export.xlsx")
+    def export_retrofit_study_xlsx(
+        study_id: str,
+        candidate_id: str | None = None,
+    ) -> Response:
+        study = require("retrofit_studies", study_id, RetrofitStudyResult)
+        try:
+            content = compile_retrofit_workbook(repo, study, candidate_id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        filename = f"BRIXTA_PPC_to_LC3_{study_id}.xlsx"
+        return Response(
+            content=content,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.post(
+        "/api/retrofit-studies/{study_id}/candidates/{candidate_id}/save-blend",
+        response_model=Blend,
+    )
+    def save_retrofit_candidate_as_blend(
+        study_id: str,
+        candidate_id: str,
+        payload: SaveRetrofitCandidateRequest,
+    ) -> BaseModel:
+        study = require("retrofit_studies", study_id, RetrofitStudyResult)
+        candidate = next(
+            (item for item in study.candidates if item.candidate_id == candidate_id),
+            None,
+        )
+        if candidate is None:
+            raise HTTPException(404, "Unknown retrofit candidate")
+        components = []
+        for item in candidate.components:
+            if item.component_type == "material":
+                components.append(
+                    {
+                        "component_type": "material",
+                        "material_id": item.reference_id,
+                        "blend_id": None,
+                        "percentage": item.percentage,
+                    }
+                )
+            else:
+                components.append(
+                    {
+                        "component_type": "blend",
+                        "material_id": None,
+                        "blend_id": item.reference_id,
+                        "percentage": item.percentage,
+                    }
+                )
+        blend_payload = BlendCreate(
+            name=payload.name or candidate.name,
+            blend_class="finished_cement",
+            family="LC3",
+            objective="PPC-to-LC3 retrofit Pareto candidate",
+            applicable_standard=(
+                payload.applicable_standard
+                or "Reference LC3 screening; physical and compliance validation required"
+            ),
+            components=components,
+            evidence=[],
+        )
+        return save_blend(blend_payload)
 
     @app.get("/api/cost-books", response_model=list[CostBook])
     def cost_books(include_archived: bool = Query(False)) -> list[BaseModel]:

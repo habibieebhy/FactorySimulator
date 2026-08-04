@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from .models import Blend, CalibrationRecord, CostBook, Machine, Material, Route, RunResult
+from .models import Blend, CalibrationRecord, CostBook, Machine, Material, RetrofitStudyResult, Route, RunResult
 
 
 class Repository:
@@ -18,6 +18,7 @@ class Repository:
         "cost_books": CostBook,
         "runs": RunResult,
         "calibrations": CalibrationRecord,
+        "retrofit_studies": RetrofitStudyResult,
     }
     id_fields = {
         "materials": "material_id",
@@ -27,6 +28,7 @@ class Repository:
         "cost_books": "cost_book_id",
         "runs": "run_id",
         "calibrations": "calibration_id",
+        "retrofit_studies": "study_id",
     }
 
     def __init__(self, path: str | Path | None = None) -> None:
@@ -68,13 +70,13 @@ class Repository:
     def list(self, table: str) -> list[BaseModel]:
         if table not in self.models:
             raise ValueError(f"Unknown repository table: {table}")
-        order = "DESC" if table == "runs" else "ASC"
+        order = "DESC" if table in {"runs", "retrofit_studies"} else "ASC"
         with self.connect() as db:
             rows = db.execute(f"SELECT payload FROM {table} ORDER BY created_at {order}").fetchall()
         return [self.models[table].model_validate_json(row["payload"]) for row in rows]
 
     def delete(self, table: str, entity_id: str) -> bool:
-        if table not in self.models or table == "runs":
+        if table not in self.models or table in {"runs", "retrofit_studies"}:
             raise ValueError(f"Deletion is not allowed for repository table: {table}")
         with self.connect() as db:
             cursor = db.execute(

@@ -781,3 +781,239 @@ def now() -> datetime:
 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:12]}"
+
+# ---------------------------------------------------------------------------
+# PPC -> LC3 retrofit design contracts (V0.8)
+# ---------------------------------------------------------------------------
+
+RetrofitSupplyMode = Literal["purchased_calcined_clay", "onsite_calcination"]
+RetrofitRole = Literal["clinker", "calcined_clay", "limestone", "gypsum"]
+FormulationLevel = Literal[
+    "quarry_stockpile",
+    "raw_meal",
+    "kiln_feed",
+    "clinker",
+    "finished_cement",
+    "fuel",
+    "electrical_energy",
+]
+
+
+class RetrofitReference(BaseModel):
+    component_type: Literal["material", "blend"] = "material"
+    reference_id: str
+
+
+class PercentageBounds(BaseModel):
+    minimum_percent: float = Field(ge=0, le=100)
+    maximum_percent: float = Field(ge=0, le=100)
+
+    @model_validator(mode="after")
+    def ordered(self) -> "PercentageBounds":
+        if self.minimum_percent > self.maximum_percent:
+            raise ValueError("Minimum percentage exceeds maximum percentage")
+        return self
+
+
+class RetrofitObjectiveWeights(BaseModel):
+    cost: float = Field(default=1.0, ge=0)
+    co2: float = Field(default=1.0, ge=0)
+    output: float = Field(default=1.0, ge=0)
+    electricity: float = Field(default=0.7, ge=0)
+    thermal: float = Field(default=0.7, ge=0)
+    robustness: float = Field(default=1.0, ge=0)
+    retrofit_complexity: float = Field(default=0.8, ge=0)
+    clinker_factor: float = Field(default=0.6, ge=0)
+
+
+def default_retrofit_objective_weights() -> RetrofitObjectiveWeights:
+    """Return a fresh, fully typed default objective-weight model."""
+
+    return RetrofitObjectiveWeights(
+        cost=1.0,
+        co2=1.0,
+        output=1.0,
+        electricity=0.7,
+        thermal=0.7,
+        robustness=1.0,
+        retrofit_complexity=0.8,
+        clinker_factor=0.6,
+    )
+
+
+class PpcToLc3RetrofitRequest(BaseModel):
+    existing_ppc_blend_id: str
+    route_id: str
+    cost_book_id: str | None = None
+    target_output_tph: float = Field(100, gt=0)
+    clinker_source: RetrofitReference | None = None
+    calcined_clay_source: RetrofitReference | None = None
+    limestone_source: RetrofitReference | None = None
+    gypsum_source: RetrofitReference | None = None
+    clay_supply_mode: RetrofitSupplyMode = "purchased_calcined_clay"
+    raw_clay_material_id: str | None = None
+    clinker_bounds: PercentageBounds = Field(
+        default_factory=lambda: PercentageBounds(minimum_percent=45, maximum_percent=60)
+    )
+    calcined_clay_bounds: PercentageBounds = Field(
+        default_factory=lambda: PercentageBounds(minimum_percent=20, maximum_percent=35)
+    )
+    limestone_bounds: PercentageBounds = Field(
+        default_factory=lambda: PercentageBounds(minimum_percent=10, maximum_percent=20)
+    )
+    gypsum_bounds: PercentageBounds = Field(
+        default_factory=lambda: PercentageBounds(minimum_percent=3, maximum_percent=7)
+    )
+    clay_to_limestone_ratio_min: float = Field(1.5, gt=0)
+    clay_to_limestone_ratio_max: float = Field(2.5, gt=0)
+    raw_clay_to_calcined_yield: float = Field(0.85, gt=0, le=1)
+    calcined_clay_reactivity_index: float = Field(0.65, ge=0, le=1)
+    clay_kaolinite_percent: float = Field(45, ge=0, le=100)
+    reference_clay_calciner_capacity_tph: float = Field(45, gt=0)
+    reference_clay_calciner_electricity_kwh_t: float = Field(35, ge=0)
+    reference_clay_calciner_thermal_kcal_kg: float = Field(650, ge=0)
+    objective_weights: RetrofitObjectiveWeights = Field(
+        default_factory=default_retrofit_objective_weights
+    )
+    target_candidates: int = Field(10, ge=3, le=25)
+
+    @model_validator(mode="after")
+    def bounds_can_total_one_hundred(self) -> "PpcToLc3RetrofitRequest":
+        bounds = (
+            self.clinker_bounds,
+            self.calcined_clay_bounds,
+            self.limestone_bounds,
+            self.gypsum_bounds,
+        )
+        if sum(item.minimum_percent for item in bounds) > 100 + 1e-9:
+            raise ValueError("Minimum LC3 component bounds exceed 100%")
+        if sum(item.maximum_percent for item in bounds) < 100 - 1e-9:
+            raise ValueError("Maximum LC3 component bounds cannot reach 100%")
+        if self.clay_to_limestone_ratio_min > self.clay_to_limestone_ratio_max:
+            raise ValueError("Minimum clay-to-limestone ratio exceeds maximum")
+        if self.clay_supply_mode == "onsite_calcination" and not self.raw_clay_material_id:
+            raise ValueError("Onsite calcination requires raw_clay_material_id")
+        return self
+
+
+class RetrofitComponentShare(BaseModel):
+    role: RetrofitRole
+    component_type: Literal["material", "blend"]
+    reference_id: str
+    name: str
+    percentage: float = Field(ge=0, le=100)
+    minimum_percent: float = Field(ge=0, le=100)
+    maximum_percent: float = Field(ge=0, le=100)
+    source_status: str = "reference"
+
+
+class RetrofitAssetGap(BaseModel):
+    asset_code: str
+    asset_name: str
+    requirement: Literal["required", "recommended", "optional"] = "required"
+    reason: str
+    reference_capacity_tph: float | None = None
+    reference_capex_inr_crore: float | None = None
+    assumption_basis: str = "BRIXTA reference screening assumption"
+
+
+class RetrofitStressScenario(BaseModel):
+    scenario: str
+    chemistry_scenario: ChemistryScenario
+    clinker_percent: float
+    calcined_clay_percent: float
+    limestone_percent: float
+    gypsum_percent: float
+    predicted_output_tph: float | None = None
+    electricity_kwh_t: float | None = None
+    thermal_kcal_kg: float | None = None
+    material_cost_inr_t: float | None = None
+    total_variable_cost_inr_t: float | None = None
+    material_co2_kg_t: float | None = None
+    chemistry_complete: bool = False
+    unknown_chemistry_fields: list[str] = Field(default_factory=list)
+    feasible: bool = True
+    notes: list[str] = Field(default_factory=list)
+
+
+class FormulationStageResult(BaseModel):
+    level: FormulationLevel
+    name: str
+    purpose: str
+    inputs: list[str] = Field(default_factory=list)
+    outputs: list[str] = Field(default_factory=list)
+    key_results: dict[str, float | str | None] = Field(default_factory=dict)
+    assumptions: list[str] = Field(default_factory=list)
+
+
+class RetrofitCandidate(BaseModel):
+    candidate_id: str
+    name: str
+    components: list[RetrofitComponentShare]
+    feasible: bool
+    pareto_efficient: bool = False
+    rank: int | None = None
+    deterministic_score: float = Field(ge=0, le=100)
+    predicted_output_tph: float | None = None
+    output_shortfall_tph: float = 0
+    output_delta_vs_ppc_tph: float | None = None
+    electricity_delta_vs_ppc_kwh_t: float | None = None
+    thermal_delta_vs_ppc_kcal_kg: float | None = None
+    material_cost_delta_vs_ppc_inr_t: float | None = None
+    material_co2_delta_vs_ppc_kg_t: float | None = None
+    bottleneck_machine_name: str | None = None
+    route_compatibility_score: float = Field(ge=0, le=100)
+    route_efficiency_score: float = Field(ge=0, le=100)
+    electricity_kwh_t: float | None = None
+    thermal_kcal_kg: float | None = None
+    material_cost_inr_t: float | None = None
+    energy_cost_inr_t: float | None = None
+    total_variable_cost_inr_t: float | None = None
+    material_co2_kg_t: float | None = None
+    clinker_factor_percent: float
+    robustness_score: float = Field(ge=0, le=100)
+    retrofit_complexity_score: float = Field(ge=0, le=100)
+    chemistry: Chemistry
+    chemistry_complete: bool
+    unknown_chemistry_fields: list[str] = Field(default_factory=list)
+    missing_assets: list[RetrofitAssetGap] = Field(default_factory=list)
+    stress_tests: list[RetrofitStressScenario] = Field(default_factory=list)
+    formulation_chain: list[FormulationStageResult] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    calculation_trace: list[CalculationTraceStep] = Field(default_factory=list)
+
+
+class RetrofitBaseline(BaseModel):
+    blend_id: str
+    blend_name: str
+    family: str
+    route_id: str
+    route_name: str
+    predicted_output_tph: float | None = None
+    electricity_kwh_t: float | None = None
+    thermal_kcal_kg: float | None = None
+    material_cost_inr_t: float | None = None
+    material_co2_kg_t: float | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class RetrofitStudyResult(BaseModel):
+    study_id: str
+    created_at: datetime
+    calculation_version: str = "0.8.0"
+    study_type: Literal["ppc_to_lc3"] = "ppc_to_lc3"
+    request: PpcToLc3RetrofitRequest
+    baseline: RetrofitBaseline
+    selected_candidate_id: str | None = None
+    candidates: list[RetrofitCandidate] = Field(default_factory=list)
+    algorithm: str = (
+        "Feasibility pruning + bounded pairwise coordinate descent + "
+        "Pareto dominance filtering + low/typical/high robustness stress testing"
+    )
+    assumptions: list[AssumptionRecord] = Field(default_factory=list)
+    data_to_replace: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+class SaveRetrofitCandidateRequest(BaseModel):
+    name: str | None = None
+    applicable_standard: str | None = None
