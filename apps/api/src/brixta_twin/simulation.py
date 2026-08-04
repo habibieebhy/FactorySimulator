@@ -28,7 +28,7 @@ from .routing import analyse_route, stage_throughput_factor
 from .storage import Repository
 
 
-CALCULATION_VERSION = "0.5.2"
+CALCULATION_VERSION = "0.6.0"
 
 
 def _output_product(blend: Blend, route: Route) -> str:
@@ -92,6 +92,8 @@ class Engine:
         if not machines:
             raise ValueError("Route contains no machines")
         route_stages = {machine.process_stage for _, machine in machines}
+        output_product = _output_product(blend, route)
+        has_cement_grinding = "cement_grinding" in route_stages
         produces_clinker = "thermal_transformation" in route_stages
         produces_calcined_clay = "clay_calcination" in route_stages
         has_upstream_clinker_process = bool(
@@ -132,6 +134,13 @@ class Engine:
                 "NO_COST_BOOK",
                 "No versioned cost book selected; only legacy purchased-material prices and run tariffs are available",
             )
+        if request.target_blaine_m2_kg is not None and not has_cement_grinding:
+            validate(
+                "info",
+                "BLAINE_NOT_APPLICABLE",
+                "Target Blaine was ignored because the selected route has no cement-grinding stage",
+            )
+            request = request.model_copy(update={"target_blaine_m2_kg": None})
         if any(item.component_type == "blend" for item in blend.components):
             log(
                 "EXPAND",
@@ -333,10 +342,10 @@ class Engine:
                 effective_capacity = min(effective_capacity, machine.maximum_stable_tph)
             if machine.process_stage == "cement_grinding":
                 effective_capacity *= grinding_capacity_factor
-            cement_capacity = effective_capacity / factor if factor > 0 else None
-            if cement_capacity is not None:
-                capacity_candidates.append((cement_capacity, node_id, machine))
-            machine_factors.append((node_id, machine, factor, effective_capacity, cement_capacity))
+            output_capacity = effective_capacity / factor if factor > 0 else None
+            if output_capacity is not None:
+                capacity_candidates.append((output_capacity, node_id, machine))
+            machine_factors.append((node_id, machine, factor, effective_capacity, output_capacity))
 
         # Validate every active kiln before publishing production, energy or
         # cost results.  A BLOCK is a failed operating case, not a warning that
@@ -393,7 +402,7 @@ class Engine:
         machine_metrics: list[MachineRunMetric] = []
         electricity = 0.0
         thermal = 0.0
-        for node_id, machine, factor, effective_capacity, cement_capacity in machine_factors:
+        for node_id, machine, factor, effective_capacity, output_capacity in machine_factors:
             actual_throughput = output * factor
             target_throughput = request.target_output_tph * factor
             load_percent = actual_throughput / effective_capacity * 100 if effective_capacity else 0
@@ -415,15 +424,15 @@ class Engine:
                     machine_id=machine.machine_id,
                     machine_name=machine.name,
                     process_stage=machine.process_stage,
-                    throughput_factor_t_stage_per_t_cement=factor,
+                    throughput_factor_t_stage_per_t_output=factor,
                     actual_throughput_tph=actual_throughput,
                     effective_capacity_tph=effective_capacity,
-                    cement_equivalent_capacity_tph=cement_capacity,
+                    output_equivalent_capacity_tph=output_capacity,
                     target_throughput_tph=target_throughput,
                     target_load_percent=target_load_percent,
                     load_percent=load_percent,
-                    electricity_kwh_t_cement=electricity_contribution,
-                    thermal_kcal_kg_cement=thermal_contribution,
+                    electricity_kwh_t_output=electricity_contribution,
+                    thermal_kcal_kg_output=thermal_contribution,
                 )
             )
             log(
@@ -447,13 +456,13 @@ class Engine:
             validate(
                 "warning",
                 "CAPACITY_CONSTRAINT",
-                f"{bottleneck_machine.name} constrains {_output_product(blend, route)} output at {bottleneck:.2f} t/h",
+                f"{bottleneck_machine.name} constrains {output_product} output at {bottleneck:.2f} t/h",
             )
         else:
             validate(
                 "info",
                 "CAPACITY_HEADROOM",
-                f"Target is feasible; {bottleneck_machine.name} has {bottleneck - output:.2f} t/h {_output_product(blend, route)} headroom",
+                f"Target is feasible; {bottleneck_machine.name} has {bottleneck - output:.2f} t/h {output_product} headroom",
             )
 
         electricity_rate = (
@@ -508,7 +517,6 @@ class Engine:
         # recipe sent through a clinker-only route therefore consumes
         # 1 / yield tonnes of blend for every tonne of clinker output.  Finished
         # cement and all same-basis routes retain the normal 1:1 factor.
-        output_product = _output_product(blend, route)
         material_input_factor = (
             1.0 / max(effective_yield, 1e-9)
             if blend.blend_class == "raw_meal" and output_product == "clinker"
@@ -573,8 +581,8 @@ class Engine:
                     tonnes_per_run=total_output * tonnes_per_t_output,
                     applied_unit_cost_inr_t=unit_cost,
                     cost_basis=cost_basis,
-                    cost_inr_t_cement=contribution,
-                    co2_kg_t_cement=co2_contribution,
+                    cost_inr_t_output=contribution,
+                    co2_kg_t_output=co2_contribution,
                     evidence_class=component.evidence_class,
                 )
             )
@@ -605,40 +613,111 @@ class Engine:
             )
         direct_cost = material_cost + energy_cost if material_cost is not None else None
 
-        operating_fields = [
-            cost_book.packing_inr_t if cost_book else None,
-            cost_book.labour_inr_t if cost_book else None,
-            cost_book.maintenance_inr_t if cost_book else None,
-            cost_book.other_variable_inr_t if cost_book else None,
-        ]
-        plant_cash_cost = (
-            direct_cost + sum(value for value in operating_fields if value is not None)
-            if direct_cost is not None and all(value is not None for value in operating_fields)
-            else None
-        )
-        full_cost = (
-            plant_cash_cost
-            + cost_book.factory_overhead_inr_t
-            + cost_book.outbound_logistics_inr_t
-            if plant_cash_cost is not None
-            and cost_book
-            and cost_book.factory_overhead_inr_t is not None
-            and cost_book.outbound_logistics_inr_t is not None
-            else None
-        )
+        clinker_only_cost_basis = output_product == "clinker" and not has_cement_grinding
+        included_costs = ["route electricity", "route thermal fuel"]
         excluded_costs: list[str] = []
-        if not cost_book or cost_book.packing_inr_t is None:
-            excluded_costs.append("packing materials")
-        if not cost_book or cost_book.labour_inr_t is None:
-            excluded_costs.append("labour")
-        if not cost_book or cost_book.maintenance_inr_t is None:
-            excluded_costs.append("maintenance")
-        if not cost_book or cost_book.other_variable_inr_t is None:
-            excluded_costs.append("other variable operating costs")
-        if not cost_book or cost_book.factory_overhead_inr_t is None:
-            excluded_costs.append("factory overhead")
-        if not cost_book or cost_book.outbound_logistics_inr_t is None:
-            excluded_costs.append("outbound logistics")
+        if material_cost is None:
+            excluded_costs.append("applicable material prices (not fully provided)")
+        else:
+            included_costs.insert(0, "applicable materials")
+
+        if clinker_only_cost_basis:
+            packing_cost = None
+            labour_cost = cost_book.clinker_labour_inr_t if cost_book else None
+            maintenance_cost = cost_book.clinker_maintenance_inr_t if cost_book else None
+            other_variable_cost = (
+                cost_book.clinker_other_variable_inr_t if cost_book else None
+            )
+            factory_overhead_cost = (
+                cost_book.clinker_factory_overhead_inr_t if cost_book else None
+            )
+            outbound_logistics_cost = None
+            operating_cost_basis = (
+                "clinker-only output; only clinker-stage allocations are applied"
+            )
+            operating_fields = [labour_cost, maintenance_cost, other_variable_cost]
+            plant_cash_cost = (
+                direct_cost + sum(value for value in operating_fields if value is not None)
+                if direct_cost is not None and all(value is not None for value in operating_fields)
+                else None
+            )
+            full_cost = (
+                plant_cash_cost + factory_overhead_cost
+                if plant_cash_cost is not None and factory_overhead_cost is not None
+                else None
+            )
+            excluded_costs.extend(
+                [
+                    "cement grinding (route not present)",
+                    "cement packing and dispatch (route not present)",
+                    "finished-cement outbound logistics (route not present)",
+                    "cement-wide labour, maintenance and overhead allocations (not applied to clinker output)",
+                ]
+            )
+            if cost_book and any(
+                value is not None
+                for value in (
+                    cost_book.packing_inr_t,
+                    cost_book.labour_inr_t,
+                    cost_book.maintenance_inr_t,
+                    cost_book.other_variable_inr_t,
+                    cost_book.factory_overhead_inr_t,
+                    cost_book.outbound_logistics_inr_t,
+                )
+            ):
+                validate(
+                    "info",
+                    "CEMENT_DOWNSTREAM_COSTS_EXCLUDED",
+                    "Cement-wide packing, dispatch, logistics and operating allocations were not charged to clinker output",
+                )
+            route_cost_fields = [
+                ("clinker-stage labour", labour_cost),
+                ("clinker-stage maintenance", maintenance_cost),
+                ("clinker-stage other variable operating costs", other_variable_cost),
+                ("clinker-stage factory overhead", factory_overhead_cost),
+            ]
+        else:
+            packing_cost = cost_book.packing_inr_t if cost_book else None
+            labour_cost = cost_book.labour_inr_t if cost_book else None
+            maintenance_cost = cost_book.maintenance_inr_t if cost_book else None
+            other_variable_cost = cost_book.other_variable_inr_t if cost_book else None
+            factory_overhead_cost = cost_book.factory_overhead_inr_t if cost_book else None
+            outbound_logistics_cost = (
+                cost_book.outbound_logistics_inr_t if cost_book else None
+            )
+            operating_cost_basis = "finished-output cost-book allocation"
+            operating_fields = [
+                packing_cost,
+                labour_cost,
+                maintenance_cost,
+                other_variable_cost,
+            ]
+            plant_cash_cost = (
+                direct_cost + sum(value for value in operating_fields if value is not None)
+                if direct_cost is not None and all(value is not None for value in operating_fields)
+                else None
+            )
+            full_cost = (
+                plant_cash_cost + factory_overhead_cost + outbound_logistics_cost
+                if plant_cash_cost is not None
+                and factory_overhead_cost is not None
+                and outbound_logistics_cost is not None
+                else None
+            )
+            route_cost_fields = [
+                ("packing materials", packing_cost),
+                ("labour", labour_cost),
+                ("maintenance", maintenance_cost),
+                ("other variable operating costs", other_variable_cost),
+                ("factory overhead", factory_overhead_cost),
+                ("outbound logistics", outbound_logistics_cost),
+            ]
+
+        for name, value in route_cost_fields:
+            if value is None:
+                excluded_costs.append(f"{name} (applicable value not provided)")
+            else:
+                included_costs.append(name)
         excluded_costs.extend(["depreciation", "finance", "taxes", "margin"])
 
         log("HEAT", "ROUTE", f"electricity={electricity:.2f} kWh/t thermal={thermal:.2f} kcal/kg")
@@ -683,7 +762,7 @@ class Engine:
                     basis=(
                         "Derived from raw-meal LOI and entered moisture"
                         if derived_yield is not None
-                        else "Run input used to convert upstream equipment capacity to cement-equivalent capacity"
+                        else "Run input used to convert upstream equipment capacity to output-equivalent capacity"
                     ),
                 )
             )
@@ -697,12 +776,20 @@ class Engine:
                 AssumptionRecord(
                     key="grinding_capacity_factor",
                     value=f"{grinding_capacity_factor:.4f}",
-                    basis="Stored material grindability and target/design Blaine correction",
+                    basis=(
+                        "Stored material grindability and target/design Blaine correction"
+                        if has_cement_grinding
+                        else "Not applicable; route has no cement-grinding stage"
+                    ),
                 ),
                 AssumptionRecord(
                     key="grinding_energy_factor",
                     value=f"{grinding_energy_factor:.4f}",
-                    basis="Stored material grindability and target/design Blaine correction",
+                    basis=(
+                        "Stored material grindability and target/design Blaine correction"
+                        if has_cement_grinding
+                        else "Not applicable; route has no cement-grinding stage"
+                    ),
                 ),
             ]
         )
@@ -783,15 +870,17 @@ class Engine:
                 thermal_inr_t=thermal_cost,
                 energy_inr_t=energy_cost,
                 direct_model_cost_inr_t=direct_cost,
-                packing_inr_t=cost_book.packing_inr_t if cost_book else None,
-                labour_inr_t=cost_book.labour_inr_t if cost_book else None,
-                maintenance_inr_t=cost_book.maintenance_inr_t if cost_book else None,
-                other_variable_inr_t=cost_book.other_variable_inr_t if cost_book else None,
+                packing_inr_t=packing_cost,
+                labour_inr_t=labour_cost,
+                maintenance_inr_t=maintenance_cost,
+                other_variable_inr_t=other_variable_cost,
                 plant_cash_cost_inr_t=plant_cash_cost,
-                factory_overhead_inr_t=cost_book.factory_overhead_inr_t if cost_book else None,
-                outbound_logistics_inr_t=cost_book.outbound_logistics_inr_t if cost_book else None,
+                factory_overhead_inr_t=factory_overhead_cost,
+                outbound_logistics_inr_t=outbound_logistics_cost,
                 full_cost_inr_t=full_cost,
                 cost_book_name=cost_book.name if cost_book else None,
+                operating_cost_basis=operating_cost_basis,
+                included_costs=included_costs,
                 excluded_costs=excluded_costs,
             ),
             energy_breakdown=EnergyBreakdown(

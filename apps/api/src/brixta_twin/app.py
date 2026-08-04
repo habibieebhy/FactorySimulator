@@ -48,7 +48,7 @@ def create_app(path: str | Path | None = None) -> FastAPI:
     repo = Repository(path)
     seed(repo)
     engine = Engine(repo)
-    app = FastAPI(title="BRIXTA Cement Twin API", version="0.5.2")
+    app = FastAPI(title="BRIXTA Cement Twin API", version="0.6.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -89,7 +89,7 @@ def create_app(path: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "service": "brixta-cement-twin-api", "version": "0.5.2"}
+        return {"status": "ok", "service": "brixta-cement-twin-api", "version": "0.6.0"}
 
     @app.get("/api/materials", response_model=list[Material])
     def materials(include_archived: bool = Query(False)) -> list[BaseModel]:
@@ -434,7 +434,7 @@ def create_app(path: str | Path | None = None) -> FastAPI:
             writer.writerow(["material_per_output", item.material_name, item.tonnes_per_t_output, f"t input/t {product}"])
             writer.writerow(["material_rate", item.material_name, valid_value(item.tonnes_per_hour), "t/h input material"])
             writer.writerow(["material_run_total", item.material_name, valid_value(item.tonnes_per_run), f"t/{result.request.duration_hours:g} h run"])
-            writer.writerow(["material_cost", item.material_name, valid_value(item.cost_inr_t_cement), f"INR/t {product}; {item.cost_basis}; unit cost={item.applied_unit_cost_inr_t}"])
+            writer.writerow(["material_cost", item.material_name, valid_value(item.cost_inr_t_output), f"INR/t {product}; {item.cost_basis}; unit cost={item.applied_unit_cost_inr_t}"])
         for item in result.machine_metrics:
             writer.writerow(["machine", item.machine_name, item.load_percent, "load percent"])
             writer.writerow(["machine_target", item.machine_name, item.target_load_percent, "target-required load percent"])

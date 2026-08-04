@@ -198,6 +198,10 @@ export type CostBook = {
   other_variable_inr_t: number | null;
   factory_overhead_inr_t: number | null;
   outbound_logistics_inr_t: number | null;
+  clinker_labour_inr_t: number | null;
+  clinker_maintenance_inr_t: number | null;
+  clinker_other_variable_inr_t: number | null;
+  clinker_factory_overhead_inr_t: number | null;
   material_costs: MaterialCostEntry[];
   evidence: Evidence[];
   notes?: string | null;
@@ -214,15 +218,15 @@ export type MachineRunMetric = {
   machine_id: string;
   machine_name: string;
   process_stage: string;
-  throughput_factor_t_stage_per_t_cement: number;
+  throughput_factor_t_stage_per_t_output: number;
   actual_throughput_tph: number;
   effective_capacity_tph: number;
-  cement_equivalent_capacity_tph: number | null;
+  output_equivalent_capacity_tph: number | null;
   target_throughput_tph: number;
   target_load_percent: number;
   load_percent: number;
-  electricity_kwh_t_cement: number;
-  thermal_kcal_kg_cement: number;
+  electricity_kwh_t_output: number;
+  thermal_kcal_kg_output: number;
 };
 
 export type MaterialRunMetric = {
@@ -235,8 +239,8 @@ export type MaterialRunMetric = {
   tonnes_per_run: number;
   applied_unit_cost_inr_t: number | null;
   cost_basis: string;
-  cost_inr_t_cement: number | null;
-  co2_kg_t_cement: number | null;
+  cost_inr_t_output: number | null;
+  co2_kg_t_output: number | null;
   evidence_class: string;
 };
 
@@ -319,6 +323,8 @@ export type Result = {
     outbound_logistics_inr_t: number | null;
     full_cost_inr_t: number | null;
     cost_book_name: string | null;
+    operating_cost_basis: string;
+    included_costs: string[];
     excluded_costs: string[];
   } | null;
   energy_breakdown: {

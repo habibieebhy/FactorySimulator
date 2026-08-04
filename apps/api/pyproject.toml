@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brixta-cement-twin-api"
-version = "0.5.2"
+version = "0.6.0"
 description = "Deterministic BRIXTA cement blend and machinery twin"
 requires-python = ">=3.11"
 dependencies = ["fastapi>=0.115,<1", "pydantic>=2.10,<3", "uvicorn[standard]>=0.34,<1"]

@@ -130,15 +130,32 @@ def optimise_raw_mix(repository: Repository, request: RawMixOptimisationRequest)
     else:
         clinker_yield = max(0.0, min(1.0, 1.0 - chemistry.loi / 100.0))
 
+    positive_suggestions = [
+        (material, percentage)
+        for material, percentage in zip(materials, percentages, strict=True)
+        if percentage > 1e-8
+    ]
+    rounded_percentages = [round(percentage, 4) for _, percentage in positive_suggestions]
+    if rounded_percentages:
+        largest_index = max(range(len(rounded_percentages)), key=rounded_percentages.__getitem__)
+        rounded_percentages[largest_index] = round(
+            rounded_percentages[largest_index] + (100.0 - sum(rounded_percentages)),
+            4,
+        )
+
     return RawMixOptimisationResult(
         feasible=feasible,
         suggestions=[
             RawMixSuggestion(
                 material_id=material.material_id,
                 material_name=material.name,
-                percentage=round(percentage, 4),
+                percentage=percentage,
             )
-            for material, percentage in zip(materials, percentages, strict=True)
+            for (material, _), percentage in zip(
+                positive_suggestions,
+                rounded_percentages,
+                strict=True,
+            )
         ],
         chemistry=chemistry,
         lsf=lsf,

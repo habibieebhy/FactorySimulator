@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Annotated, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 
 class Evidence(BaseModel):
@@ -360,6 +360,10 @@ class CostBookCreate(BaseModel):
     other_variable_inr_t: float | None = Field(default=None, ge=0)
     factory_overhead_inr_t: float | None = Field(default=None, ge=0)
     outbound_logistics_inr_t: float | None = Field(default=None, ge=0)
+    clinker_labour_inr_t: float | None = Field(default=None, ge=0)
+    clinker_maintenance_inr_t: float | None = Field(default=None, ge=0)
+    clinker_other_variable_inr_t: float | None = Field(default=None, ge=0)
+    clinker_factory_overhead_inr_t: float | None = Field(default=None, ge=0)
     material_costs: list[MaterialCostEntry] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     notes: str | None = None
@@ -448,6 +452,13 @@ class RawMixOptimisationRequest(BaseModel):
     target_am: float = Field(1.5, gt=0)
     chemistry_scenario: ChemistryScenario = "typical"
 
+    @model_validator(mode="after")
+    def material_constraints_are_unique(self) -> "RawMixOptimisationRequest":
+        material_ids = [item.material_id for item in self.materials]
+        if len(material_ids) != len(set(material_ids)):
+            raise ValueError("Each raw-mix material may appear only once")
+        return self
+
 
 class RawMixSuggestion(BaseModel):
     material_id: str
@@ -492,15 +503,35 @@ class MachineRunMetric(BaseModel):
     machine_id: str
     machine_name: str
     process_stage: str
-    throughput_factor_t_stage_per_t_cement: float
+    throughput_factor_t_stage_per_t_output: float = Field(
+        validation_alias=AliasChoices(
+            "throughput_factor_t_stage_per_t_output",
+            "throughput_factor_t_stage_per_t_cement",
+        )
+    )
     actual_throughput_tph: float
     effective_capacity_tph: float
-    cement_equivalent_capacity_tph: float | None
+    output_equivalent_capacity_tph: float | None = Field(
+        validation_alias=AliasChoices(
+            "output_equivalent_capacity_tph",
+            "cement_equivalent_capacity_tph",
+        )
+    )
     target_throughput_tph: float = 0
     target_load_percent: float = 0
     load_percent: float
-    electricity_kwh_t_cement: float
-    thermal_kcal_kg_cement: float
+    electricity_kwh_t_output: float = Field(
+        validation_alias=AliasChoices(
+            "electricity_kwh_t_output",
+            "electricity_kwh_t_cement",
+        )
+    )
+    thermal_kcal_kg_output: float = Field(
+        validation_alias=AliasChoices(
+            "thermal_kcal_kg_output",
+            "thermal_kcal_kg_cement",
+        )
+    )
 
 
 class MaterialRunMetric(BaseModel):
@@ -513,8 +544,12 @@ class MaterialRunMetric(BaseModel):
     tonnes_per_run: float
     applied_unit_cost_inr_t: float | None = None
     cost_basis: str = "unknown"
-    cost_inr_t_cement: float | None
-    co2_kg_t_cement: float | None
+    cost_inr_t_output: float | None = Field(
+        validation_alias=AliasChoices("cost_inr_t_output", "cost_inr_t_cement")
+    )
+    co2_kg_t_output: float | None = Field(
+        validation_alias=AliasChoices("co2_kg_t_output", "co2_kg_t_cement")
+    )
     evidence_class: str
 
 
@@ -533,6 +568,8 @@ class CostBreakdown(BaseModel):
     outbound_logistics_inr_t: float | None = None
     full_cost_inr_t: float | None = None
     cost_book_name: str | None = None
+    operating_cost_basis: str = "legacy/unspecified allocation"
+    included_costs: list[str] = Field(default_factory=list)
     excluded_costs: list[str] = Field(default_factory=list)
 
 
@@ -554,7 +591,7 @@ class RunResult(BaseModel):
     run_id: str
     created_at: datetime
     request: RunRequest
-    calculation_version: str = "0.5.2"
+    calculation_version: str = "0.6.0"
     run_status: Literal["completed", "blocked"] = "completed"
     output_product: str = "cement"
     blend_snapshot: Blend | None = None
