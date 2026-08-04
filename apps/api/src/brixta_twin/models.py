@@ -194,6 +194,12 @@ class ResolvedBlendComponent(BaseModel):
     percentage: float
     evidence_class: str
     material_version: int = 1
+    production_stream: str = "direct_product"
+    root_component_type: Literal["material", "blend"] = "material"
+    root_component_id: str | None = None
+    root_component_name: str | None = None
+    root_blend_class: BlendClass | None = None
+    hierarchy_path: list[str] = Field(default_factory=list)
 
 
 class BlendPreview(BaseModel):
@@ -315,6 +321,19 @@ class Route(RouteCreate):
     created_at: datetime
 
 
+class RouteGraphAnalysis(BaseModel):
+    acyclic: bool
+    topological_order: list[str] = Field(default_factory=list)
+    source_nodes: list[str] = Field(default_factory=list)
+    sink_nodes: list[str] = Field(default_factory=list)
+    critical_path_node_ids: list[str] = Field(default_factory=list)
+    critical_path_labels: list[str] = Field(default_factory=list)
+    graph_depth: int = 0
+    critical_path_hours_per_t_output: float | None = None
+    algorithm: str = "Kahn topological sort + DAG dynamic programming"
+    warnings: list[str] = Field(default_factory=list)
+
+
 class RouteAnalysis(BaseModel):
     route_id: str
     route_name: str
@@ -323,8 +342,18 @@ class RouteAnalysis(BaseModel):
     flow_summary: str
     compatible: bool
     compatibility_score: float = Field(ge=0, le=100)
+    efficiency_score: float = Field(default=0, ge=0, le=100)
     predicted_output_tph: float | None = None
     bottleneck_machine_name: str | None = None
+    electricity_kwh_t_output: float | None = None
+    thermal_kcal_kg_output: float | None = None
+    weighted_availability: float | None = None
+    mean_technology_readiness_level: float | None = None
+    graph: RouteGraphAnalysis | None = None
+    pareto_efficient: bool = False
+    distance_from_selected: float | None = None
+    improves_selected: bool = False
+    improvement_reasons: list[str] = Field(default_factory=list)
     required_stages: list[str] = Field(default_factory=list)
     present_stages: list[str] = Field(default_factory=list)
     missing_stages: list[str] = Field(default_factory=list)
@@ -337,6 +366,8 @@ class RouteRecommendationSet(BaseModel):
     target_output_tph: float
     selected_route_id: str | None = None
     selected: RouteAnalysis | None = None
+    nearest_more_efficient_route_id: str | None = None
+    algorithm: str = "DAG validation + Pareto frontier + weighted graph-distance ranking"
     recommendations: list[RouteAnalysis] = Field(default_factory=list)
 
 
@@ -445,11 +476,72 @@ class RawMixMaterialConstraint(BaseModel):
         return self
 
 
+ClinkerFamily = Literal[
+    "moduli_only",
+    "general_purpose",
+    "high_early_strength",
+    "durable_belite",
+    "sulfate_resistant",
+    "low_carbon_belite",
+    "lc3_compatible",
+    "custom",
+]
+
+
+class CalculationTraceStep(BaseModel):
+    sequence: int
+    section: str
+    operation: str
+    formula: str
+    inputs: dict[str, float | str | None] = Field(default_factory=dict)
+    result: float | str | None = None
+    unit: str | None = None
+    route_node_id: str | None = None
+
+
+class ClinkerMineralogy(BaseModel):
+    method: str = "ASTM-style Bogue potential phase estimate"
+    calculation_basis: str = "Loss-free, normalised clinker oxide basis"
+    c3s_percent: float | None = None
+    c2s_percent: float | None = None
+    c3a_percent: float | None = None
+    c4af_percent: float | None = None
+    calcium_aluminoferrite_ss_percent: float | None = None
+    phase_total_percent: float | None = None
+    unallocated_percent: float | None = None
+    alumina_ferric_ratio: float | None = None
+    estimated_uncertainty_1sigma: dict[str, float] = Field(
+        default_factory=lambda: {"c3s": 9.6, "c2s": 9.6, "c3a": 2.2, "c4af": 1.4}
+    )
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ClinkerBehaviourScreening(BaseModel):
+    method: str = "Deterministic chemistry screening; not a plant-calibrated prediction"
+    liquid_phase_1450_percent: float | None = None
+    burnability_score: float | None = Field(default=None, ge=0, le=100)
+    burnability_class: Literal["good", "moderate", "difficult", "unknown"] = "unknown"
+    free_lime_risk: Literal["low", "medium", "high", "unknown"] = "unknown"
+    expected_fuel_demand: Literal["low", "medium", "high", "unknown"] = "unknown"
+    expected_early_strength: Literal["low", "medium", "high", "unknown"] = "unknown"
+    expected_later_strength: Literal["low", "medium", "high", "unknown"] = "unknown"
+    expected_sulfate_resistance: Literal["low", "moderate", "high", "unknown"] = "unknown"
+    expected_heat_release: Literal["low", "moderate", "high", "unknown"] = "unknown"
+    predicted_family: ClinkerFamily | None = None
+    family_distance: float | None = None
+    rationale: list[str] = Field(default_factory=list)
+
+
 class RawMixOptimisationRequest(BaseModel):
     materials: list[RawMixMaterialConstraint] = Field(min_length=2)
     target_lsf: float = Field(95, gt=0)
     target_sm: float = Field(2.5, gt=0)
     target_am: float = Field(1.5, gt=0)
+    clinker_family: ClinkerFamily = "moduli_only"
+    target_c3s_percent: float | None = Field(default=None, ge=0, le=100)
+    target_c2s_percent: float | None = Field(default=None, ge=0, le=100)
+    target_c3a_percent: float | None = Field(default=None, ge=0, le=100)
+    target_c4af_percent: float | None = Field(default=None, ge=0, le=100)
     chemistry_scenario: ChemistryScenario = "typical"
 
     @model_validator(mode="after")
@@ -470,11 +562,16 @@ class RawMixOptimisationResult(BaseModel):
     feasible: bool
     suggestions: list[RawMixSuggestion]
     chemistry: Chemistry
+    clinker_chemistry: Chemistry | None = None
+    mineralogy: ClinkerMineralogy | None = None
+    behaviour: ClinkerBehaviourScreening | None = None
+    clinker_family: ClinkerFamily = "moduli_only"
     lsf: float | None
     silica_modulus: float | None
     alumina_modulus: float | None
     estimated_clinker_yield: float | None
     objective_error: float
+    calculation_trace: list[CalculationTraceStep] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -500,6 +597,7 @@ class AssumptionRecord(BaseModel):
 
 class MachineRunMetric(BaseModel):
     node_id: str
+    process_stream: str = "unspecified"
     machine_id: str
     machine_name: str
     process_stage: str
@@ -536,6 +634,7 @@ class MachineRunMetric(BaseModel):
 
 class MaterialRunMetric(BaseModel):
     material_id: str
+    production_stream: str = "direct_product"
     material_name: str
     material_type: str
     percentage: float
@@ -591,7 +690,7 @@ class RunResult(BaseModel):
     run_id: str
     created_at: datetime
     request: RunRequest
-    calculation_version: str = "0.6.0"
+    calculation_version: str = "0.7.1"
     run_status: Literal["completed", "blocked"] = "completed"
     output_product: str = "cement"
     blend_snapshot: Blend | None = None
@@ -606,6 +705,13 @@ class RunResult(BaseModel):
     derived_raw_meal_to_clinker_yield: float | None = None
     fuel_ash_contribution_kg_t_clinker: float | None = None
     fuel_ash_adjusted_chemistry: Chemistry | None = None
+    clinker_chemistry: Chemistry | None = None
+    clinker_lsf: float | None = None
+    clinker_silica_modulus: float | None = None
+    clinker_alumina_modulus: float | None = None
+    clinker_mineralogy: ClinkerMineralogy | None = None
+    clinker_behaviour: ClinkerBehaviourScreening | None = None
+    calculation_trace: list[CalculationTraceStep] = Field(default_factory=list)
     grinding_capacity_factor: float = 1.0
     grinding_energy_factor: float = 1.0
     lsf: float | None

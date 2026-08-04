@@ -48,7 +48,7 @@ def create_app(path: str | Path | None = None) -> FastAPI:
     repo = Repository(path)
     seed(repo)
     engine = Engine(repo)
-    app = FastAPI(title="BRIXTA Cement Twin API", version="0.6.0")
+    app = FastAPI(title="BRIXTA Cement Twin API", version="0.7.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -89,7 +89,7 @@ def create_app(path: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "service": "brixta-cement-twin-api", "version": "0.6.0"}
+        return {"status": "ok", "service": "brixta-cement-twin-api", "version": "0.7.0"}
 
     @app.get("/api/materials", response_model=list[Material])
     def materials(include_archived: bool = Query(False)) -> list[BaseModel]:
@@ -403,6 +403,10 @@ def create_app(path: str | Path | None = None) -> FastAPI:
             ("configuration", "route_kind", result.route_analysis.route_kind if result.route_analysis else "legacy", ""),
             ("configuration", "route_flow", result.route_analysis.flow_summary if result.route_analysis else "legacy", ""),
             ("configuration", "route_compatibility_score", result.route_analysis.compatibility_score if result.route_analysis else None, "0-100"),
+            ("configuration", "route_efficiency_score", result.route_analysis.efficiency_score if result.route_analysis else None, "0-100 deterministic score"),
+            ("configuration", "route_graph_acyclic", result.route_analysis.graph.acyclic if result.route_analysis and result.route_analysis.graph else None, "Kahn topological sort"),
+            ("configuration", "route_critical_path", " -> ".join(result.route_analysis.graph.critical_path_labels) if result.route_analysis and result.route_analysis.graph else None, "DAG capacity-critical path"),
+            ("configuration", "route_critical_path_hours_per_t_output", result.route_analysis.graph.critical_path_hours_per_t_output if result.route_analysis and result.route_analysis.graph else None, "h/t output"),
             ("configuration", "cost_book", result.cost_book_snapshot.name if result.cost_book_snapshot else "none", ""),
             ("configuration", "chemistry_scenario", result.chemistry_scenario, "low/typical/high"),
             ("output", "product", product, ""),
@@ -426,18 +430,40 @@ def create_app(path: str | Path | None = None) -> FastAPI:
             ("process_correction", "grinding_capacity_factor", result.grinding_capacity_factor, "multiplier"),
             ("process_correction", "grinding_energy_factor", result.grinding_energy_factor, "multiplier"),
             ("process_correction", "fuel_ash_contribution", result.fuel_ash_contribution_kg_t_clinker, "kg/t clinker"),
+            ("clinker_moduli", "LSF", result.clinker_lsf, "clinker basis"),
+            ("clinker_moduli", "SM", result.clinker_silica_modulus, "clinker basis"),
+            ("clinker_moduli", "AM", result.clinker_alumina_modulus, "clinker basis"),
+            ("clinker_mineralogy", "C3S", result.clinker_mineralogy.c3s_percent if result.clinker_mineralogy else None, "potential mass %; Bogue estimate"),
+            ("clinker_mineralogy", "C2S", result.clinker_mineralogy.c2s_percent if result.clinker_mineralogy else None, "potential mass %; Bogue estimate"),
+            ("clinker_mineralogy", "C3A", result.clinker_mineralogy.c3a_percent if result.clinker_mineralogy else None, "potential mass %; Bogue estimate"),
+            ("clinker_mineralogy", "C4AF", result.clinker_mineralogy.c4af_percent if result.clinker_mineralogy else None, "potential mass %; Bogue estimate"),
+            ("clinker_behaviour", "burnability", result.clinker_behaviour.burnability_class if result.clinker_behaviour else None, "deterministic screening"),
+            ("clinker_behaviour", "free_lime_risk", result.clinker_behaviour.free_lime_risk if result.clinker_behaviour else None, "deterministic screening"),
+            ("clinker_behaviour", "expected_fuel_demand", result.clinker_behaviour.expected_fuel_demand if result.clinker_behaviour else None, "deterministic screening"),
+            ("clinker_behaviour", "expected_early_strength", result.clinker_behaviour.expected_early_strength if result.clinker_behaviour else None, "deterministic screening"),
+            ("clinker_behaviour", "expected_sulfate_resistance", result.clinker_behaviour.expected_sulfate_resistance if result.clinker_behaviour else None, "deterministic screening"),
             ("quality", "OPC43_gate", result.quality_gate.status if result.quality_gate else "not_applicable", "measured-results gate"),
         ]
         writer.writerows(rows)
         for item in result.material_metrics:
-            writer.writerow(["material_percent", item.material_name, item.percentage, "mass percent of input blend"])
+            writer.writerow(["material_percent", item.material_name, item.percentage, f"mass percent; stream={item.production_stream}"])
             writer.writerow(["material_per_output", item.material_name, item.tonnes_per_t_output, f"t input/t {product}"])
             writer.writerow(["material_rate", item.material_name, valid_value(item.tonnes_per_hour), "t/h input material"])
             writer.writerow(["material_run_total", item.material_name, valid_value(item.tonnes_per_run), f"t/{result.request.duration_hours:g} h run"])
             writer.writerow(["material_cost", item.material_name, valid_value(item.cost_inr_t_output), f"INR/t {product}; {item.cost_basis}; unit cost={item.applied_unit_cost_inr_t}"])
         for item in result.machine_metrics:
-            writer.writerow(["machine", item.machine_name, item.load_percent, "load percent"])
+            writer.writerow(["machine", item.machine_name, item.load_percent, f"load percent; stream={item.process_stream}; stage={item.process_stage}"])
             writer.writerow(["machine_target", item.machine_name, item.target_load_percent, "target-required load percent"])
+            writer.writerow(["machine_flow", item.machine_name, item.actual_throughput_tph, f"t/h; factor={item.throughput_factor_t_stage_per_t_output}"])
+            writer.writerow(["machine_electricity", item.machine_name, item.electricity_kwh_t_output, f"kWh/t {product}; stream={item.process_stream}"])
+            writer.writerow(["machine_thermal", item.machine_name, item.thermal_kcal_kg_output, f"kcal/kg {product}; stream={item.process_stream}"])
+        for step in result.calculation_trace:
+            writer.writerow([
+                "calculation_trace",
+                f"{step.sequence}:{step.section}:{step.operation}",
+                step.result,
+                f"{step.unit or ''}; formula={step.formula}; route_node={step.route_node_id or ''}; inputs={step.inputs}",
+            ])
         for item in result.validation:
             writer.writerow(["validation", item.code, item.severity, item.message])
         if result.route_analysis:

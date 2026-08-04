@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from .blending import chemistry_for_scenario, preview_blend
+from .blending import chemistry_for_scenario, direct_production_fractions, preview_blend
 from .models import (
     AssumptionRecord,
     Blend,
+    CalculationTraceStep,
     CarbonBreakdown,
     Chemistry,
     CostBook,
@@ -22,13 +23,14 @@ from .models import (
     new_id,
     now,
 )
-from .optimisation import cement_moduli
+from .mineralogy import bogue_potential_phases, clinker_basis_chemistry, screen_clinker_behaviour
+from .optimisation import cement_moduli, weighted_chemistry
 from .quality import opc43_gate
 from .routing import analyse_route, stage_throughput_factor
 from .storage import Repository
 
 
-CALCULATION_VERSION = "0.6.0"
+CALCULATION_VERSION = "0.7.1"
 
 
 def _output_product(blend: Blend, route: Route) -> str:
@@ -41,6 +43,19 @@ def _output_product(blend: Blend, route: Route) -> str:
         "finished_cement": "cement",
         "premix": "premix",
     }.get(blend.blend_class, "product")
+
+
+
+def _process_stream_for_stage(stage: str) -> str:
+    if stage in {"crushing", "raw_grinding"}:
+        return "clinker_raw_feed"
+    if stage == "thermal_transformation":
+        return "clinker_line"
+    if stage == "clay_calcination":
+        return "calcined_clay_line"
+    if stage in {"cement_grinding", "packing_dispatch"}:
+        return "finished_cement"
+    return "product_stream"
 
 
 def _unique_evidence(items: list[Evidence]) -> list[Evidence]:
@@ -103,6 +118,29 @@ class Engine:
         )
 
         events: list[RunEvent] = []
+        calculation_trace: list[CalculationTraceStep] = []
+
+        def trace(
+            section: str,
+            operation: str,
+            formula: str,
+            inputs: dict[str, float | str | None],
+            result: float | str | None,
+            unit: str | None = None,
+            route_node_id: str | None = None,
+        ) -> None:
+            calculation_trace.append(
+                CalculationTraceStep(
+                    sequence=len(calculation_trace) + 1,
+                    section=section,
+                    operation=operation,
+                    formula=formula,
+                    inputs=inputs,
+                    result=result,
+                    unit=unit,
+                    route_node_id=route_node_id,
+                )
+            )
 
         def log(level: str, component: str, message: str) -> None:
             events.append(
@@ -163,6 +201,17 @@ class Engine:
                     f"{am:.3f}" if am is not None else "N/A",
                 ),
             )
+            trace(
+                "chemistry",
+                "Calculate raw-meal moduli",
+                "LSF=100CaO/(2.8SiO2+1.18Al2O3+0.65Fe2O3); SM=SiO2/(Al2O3+Fe2O3); AM=Al2O3/Fe2O3",
+                {"CaO": chemistry.cao, "SiO2": chemistry.sio2, "Al2O3": chemistry.al2o3, "Fe2O3": chemistry.fe2o3},
+                (
+                    f"LSF={lsf:.3f}, SM={sm:.4f}, AM={am:.4f}"
+                    if None not in (lsf, sm, am)
+                    else "incomplete chemistry"
+                ),
+            )
         else:
             validate(
                 "info",
@@ -192,6 +241,14 @@ class Engine:
                     "MASS_CONVERSION",
                     f"LOI/moisture-derived raw-meal-to-clinker yield={derived_yield:.4f}",
                 )
+                trace(
+                    "mass balance",
+                    "Calculate raw-meal-to-clinker yield",
+                    "yield=(1−LOI/100)×(1−feed moisture/100)",
+                    {"LOI_percent": chemistry.loi, "feed_moisture_percent": moisture},
+                    derived_yield,
+                    "t clinker/t raw meal",
+                )
 
         for warning in preview.warnings:
             code = "DATA_GAP" if "no " in warning.lower() or "unreported" in warning.lower() else "VALIDATION"
@@ -210,6 +267,30 @@ class Engine:
         )
         log("INFO", "ROUTE", route_analysis.description)
         log("FLOW", "ROUTE", route_analysis.flow_summary)
+        if route_analysis.graph is not None:
+            graph = route_analysis.graph
+            log(
+                "GRAPH",
+                "ROUTE_DAG",
+                "Kahn order={} | critical_path={}".format(
+                    " → ".join(graph.topological_order) or "N/A",
+                    " → ".join(graph.critical_path_labels) or "N/A",
+                ),
+            )
+            trace(
+                "route graph",
+                "Validate and order process DAG",
+                "Kahn topological sort; critical path by DAG dynamic programming using factor/effective-capacity node weights",
+                {
+                    "nodes": float(len(route.nodes)),
+                    "edges": float(len(route.edges)),
+                    "acyclic": str(graph.acyclic),
+                },
+                " → ".join(graph.topological_order) if graph.acyclic else "cycle/invalid graph",
+            )
+            if graph.acyclic:
+                order = {node_id: index for index, node_id in enumerate(graph.topological_order)}
+                machines.sort(key=lambda item: order.get(item[0], len(order)))
         if not route_analysis.compatible:
             validate(
                 "block",
@@ -240,8 +321,30 @@ class Engine:
                 fractions_by_type.get(component.material_type, 0.0)
                 + component.percentage / 100.0
             )
+        production_fractions = direct_production_fractions(self.repo, blend)
+        if blend.blend_class == "finished_cement":
+            fractions_by_type["clinker"] = production_fractions["clinker"]
+            fractions_by_type["calcined_clay"] = production_fractions["calcined_clay"]
         clinker_fraction = fractions_by_type.get("clinker", 0.0)
         calcined_clay_fraction = fractions_by_type.get("calcined_clay", 0.0)
+        if blend.blend_class == "finished_cement":
+            log(
+                "FLOW",
+                "PRODUCTION_STREAMS",
+                f"clinker={clinker_fraction * 100:.3f}% calcined_clay={calcined_clay_fraction * 100:.3f}% "
+                f"cement_additions={production_fractions['cement_addition'] * 100:.3f}%",
+            )
+            trace(
+                "material streams",
+                "Resolve direct and nested production streams",
+                "finished-cement direct components retain semantic boundaries before recursive material flattening",
+                {
+                    "clinker_fraction": clinker_fraction,
+                    "calcined_clay_fraction": calcined_clay_fraction,
+                    "cement_addition_fraction": production_fractions["cement_addition"],
+                },
+                "stream fractions resolved",
+            )
 
         fuel_ash_contribution: float | None = None
         fuel_ash_adjusted_chemistry: Chemistry | None = None
@@ -273,24 +376,220 @@ class Engine:
                 fuel_ash_contribution = (
                     request.fuel_rate_kg_t_clinker * stored_fuel.fuel_ash_percent / 100.0
                 )
-                ash_fraction = fuel_ash_contribution / 1000.0
-                adjusted: dict[str, float | None] = {}
-                for oxide in Chemistry.model_fields:
-                    raw_value = getattr(chemistry, oxide)
-                    ash_value = getattr(stored_fuel.fuel_ash_chemistry, oxide)
-                    if raw_value is None or ash_value is None:
-                        adjusted[oxide] = None
-                    elif oxide == "loi":
-                        adjusted[oxide] = 0.0
-                    else:
-                        nonvolatile = raw_value / max(effective_yield, 1e-9)
-                        adjusted[oxide] = (nonvolatile + ash_value * ash_fraction) / (1.0 + ash_fraction)
-                fuel_ash_adjusted_chemistry = Chemistry(**adjusted)
                 log(
                     "CALC",
                     "FUEL_ASH",
                     f"Fuel ash adds {fuel_ash_contribution:.2f} kg/t clinker to the kiln mineral input",
                 )
+                trace(
+                    "kiln chemistry",
+                    "Calculate retained fuel-ash mass",
+                    "ash kg/t clinker = fuel kg/t clinker × ash % / 100",
+                    {
+                        "fuel_rate_kg_t_clinker": request.fuel_rate_kg_t_clinker,
+                        "fuel_ash_percent": stored_fuel.fuel_ash_percent,
+                    },
+                    fuel_ash_contribution,
+                    "kg/t clinker",
+                )
+
+        clinker_chemistry: Chemistry | None = None
+        clinker_mineralogy = None
+        clinker_behaviour = None
+        clinker_lsf: float | None = None
+        clinker_sm: float | None = None
+        clinker_am: float | None = None
+        clinker_basis_warnings: list[str] = []
+        clinker_basis_source: str | None = None
+
+        if blend.blend_class == "raw_meal" and produces_clinker:
+            clinker_chemistry, clinker_basis_warnings = clinker_basis_chemistry(
+                chemistry,
+                effective_yield,
+                fuel_material.fuel_ash_chemistry if fuel_material else None,
+                fuel_ash_contribution,
+            )
+            clinker_basis_source = "predicted from raw meal after LOI/moisture loss and retained fuel ash"
+            fuel_ash_adjusted_chemistry = (
+                clinker_chemistry if fuel_ash_contribution is not None else None
+            )
+        elif clinker_fraction > 0:
+            direct_clinker_components = [
+                component
+                for component in preview.flattened_components
+                if component.production_stream == "clinker"
+                and component.material_type == "clinker"
+            ]
+            clinker_feed_components = [
+                component
+                for component in preview.flattened_components
+                if component.production_stream == "clinker_raw_feed"
+            ]
+            chemistry_candidates: list[tuple[Chemistry, float, str]] = []
+            if direct_clinker_components:
+                subset_fraction = sum(item.percentage for item in direct_clinker_components) / 100.0
+                subset_materials = [materials[item.material_id] for item in direct_clinker_components]
+                subset_percentages = [
+                    item.percentage / max(subset_fraction, 1e-12)
+                    for item in direct_clinker_components
+                ]
+                direct_chemistry = weighted_chemistry(
+                    subset_materials,
+                    subset_percentages,
+                    request.chemistry_scenario,
+                )
+                normalised_direct, direct_warnings = clinker_basis_chemistry(direct_chemistry)
+                clinker_basis_warnings.extend(direct_warnings)
+                if normalised_direct is not None:
+                    chemistry_candidates.append((normalised_direct, subset_fraction, "direct clinker material"))
+
+            if clinker_feed_components:
+                feed_fraction = sum(item.percentage for item in clinker_feed_components) / 100.0
+                feed_materials = [materials[item.material_id] for item in clinker_feed_components]
+                feed_percentages = [
+                    item.percentage / max(feed_fraction, 1e-12)
+                    for item in clinker_feed_components
+                ]
+                nested_raw_chemistry = weighted_chemistry(
+                    feed_materials,
+                    feed_percentages,
+                    request.chemistry_scenario,
+                )
+                predicted_nested, nested_warnings = clinker_basis_chemistry(
+                    nested_raw_chemistry,
+                    effective_yield,
+                    fuel_material.fuel_ash_chemistry if fuel_material else None,
+                    fuel_ash_contribution,
+                )
+                clinker_basis_warnings.extend(nested_warnings)
+                if predicted_nested is not None:
+                    chemistry_candidates.append((predicted_nested, feed_fraction, "nested clinker/raw-meal recipe"))
+
+            if chemistry_candidates:
+                weights_total = sum(weight for _, weight, _ in chemistry_candidates)
+                combined_values: dict[str, float | None] = {}
+                for oxide in Chemistry.model_fields:
+                    reported = [
+                        (getattr(candidate, oxide), weight)
+                        for candidate, weight, _ in chemistry_candidates
+                    ]
+                    if any(value is None for value, _ in reported):
+                        combined_values[oxide] = None
+                    else:
+                        combined_values[oxide] = sum(
+                            float(value) * weight for value, weight in reported if value is not None
+                        ) / max(weights_total, 1e-12)
+                clinker_chemistry = Chemistry(**combined_values)
+                sources = ", ".join(source for _, _, source in chemistry_candidates)
+                clinker_basis_source = f"combined from {sources}"
+                trace(
+                    "clinker chemistry",
+                    "Resolve clinker-producing nested recipe",
+                    "preserve direct clinker/raw-meal component boundary; predict clinker chemistry for raw-feed subset; combine on clinker-output share",
+                    {
+                        "clinker_fraction_of_cement": clinker_fraction,
+                        "direct_clinker_fraction": sum(item.percentage for item in direct_clinker_components) / 100.0,
+                        "nested_clinker_recipe_fraction": sum(item.percentage for item in clinker_feed_components) / 100.0,
+                        "raw_meal_to_clinker_yield": effective_yield,
+                    },
+                    clinker_basis_source,
+                )
+
+        for warning in clinker_basis_warnings:
+            validate("warning", "CLINKER_CHEMISTRY_BASIS", warning)
+
+        if clinker_chemistry is not None:
+            clinker_lsf, clinker_sm, clinker_am = cement_moduli(clinker_chemistry)
+            clinker_mineralogy = bogue_potential_phases(clinker_chemistry)
+            clinker_behaviour = screen_clinker_behaviour(
+                clinker_chemistry,
+                clinker_mineralogy,
+                clinker_lsf,
+                clinker_sm,
+                clinker_am,
+                request.kiln_temperature_c,
+            )
+            log(
+                "CALC",
+                "CLINKER_CHEMISTRY",
+                "{} | LSF={} SM={} AM={}".format(
+                    clinker_basis_source or "clinker basis",
+                    f"{clinker_lsf:.2f}" if clinker_lsf is not None else "N/A",
+                    f"{clinker_sm:.3f}" if clinker_sm is not None else "N/A",
+                    f"{clinker_am:.3f}" if clinker_am is not None else "N/A",
+                ),
+            )
+            trace(
+                "clinker chemistry",
+                "Establish clinker oxide calculation basis",
+                "raw-meal route: oxide mass/t clinker=(raw oxide%×1000/yield)+(ash kg/t×ash oxide%); direct-clinker route: isolate clinker constituent; then normalise reported nonvolatile oxides to 100%",
+                {
+                    "raw_meal_to_clinker_yield": effective_yield if blend.blend_class == "raw_meal" else None,
+                    "fuel_ash_kg_t_clinker": fuel_ash_contribution,
+                    "clinker_fraction_of_recipe": clinker_fraction,
+                },
+                clinker_basis_source or "clinker chemistry calculated",
+            )
+            if clinker_mineralogy is not None:
+                ferrite = (
+                    clinker_mineralogy.c4af_percent
+                    if clinker_mineralogy.c4af_percent is not None
+                    else clinker_mineralogy.calcium_aluminoferrite_ss_percent
+                )
+                log(
+                    "CALC",
+                    "MINERALOGY",
+                    "Bogue potential phases C3S={} C2S={} C3A={} ferrite={}".format(
+                        f"{clinker_mineralogy.c3s_percent:.2f}%" if clinker_mineralogy.c3s_percent is not None else "N/A",
+                        f"{clinker_mineralogy.c2s_percent:.2f}%" if clinker_mineralogy.c2s_percent is not None else "N/A",
+                        f"{clinker_mineralogy.c3a_percent:.2f}%" if clinker_mineralogy.c3a_percent is not None else "N/A",
+                        f"{ferrite:.2f}%" if ferrite is not None else "N/A",
+                    ),
+                )
+                trace(
+                    "clinker mineralogy",
+                    "Estimate potential clinker phases",
+                    "ASTM-style Bogue equations on loss-free clinker oxides; A/F<0.64 uses calcium aluminoferrite solid-solution branch",
+                    {
+                        "CaO": clinker_chemistry.cao,
+                        "SiO2": clinker_chemistry.sio2,
+                        "Al2O3": clinker_chemistry.al2o3,
+                        "Fe2O3": clinker_chemistry.fe2o3,
+                        "SO3": clinker_chemistry.so3,
+                    },
+                    (
+                        f"C3S={clinker_mineralogy.c3s_percent}, C2S={clinker_mineralogy.c2s_percent}, "
+                        f"C3A={clinker_mineralogy.c3a_percent}, ferrite={ferrite}"
+                    ),
+                    "mass % potential phase",
+                )
+                for warning in clinker_mineralogy.warnings:
+                    validate("info", "BOGUE_LIMITATION", warning)
+            if clinker_behaviour is not None:
+                log(
+                    "CHECK",
+                    "CLINKER_BEHAVIOUR",
+                    f"burnability={clinker_behaviour.burnability_class} ({clinker_behaviour.burnability_score}) "
+                    f"free_lime_risk={clinker_behaviour.free_lime_risk} fuel={clinker_behaviour.expected_fuel_demand}",
+                )
+                trace(
+                    "clinker behaviour",
+                    "Screen burnability and expected behaviour",
+                    "Transparent penalties from LSF, SM, liquid-phase proxy, potential C3S and entered kiln temperature",
+                    {
+                        "LSF": clinker_lsf,
+                        "SM": clinker_sm,
+                        "liquid_phase_1450_percent": clinker_behaviour.liquid_phase_1450_percent,
+                        "kiln_temperature_c": request.kiln_temperature_c,
+                    },
+                    f"score={clinker_behaviour.burnability_score}; class={clinker_behaviour.burnability_class}",
+                )
+        elif produces_clinker:
+            validate(
+                "info",
+                "MINERALOGY_SCOPE",
+                "Clinker mineralogy requires raw-meal chemistry or a direct clinker constituent with major-oxide chemistry",
+            )
 
         weighted_grindability = 0.0
         grindability_complete = True
@@ -424,6 +723,7 @@ class Engine:
                     machine_id=machine.machine_id,
                     machine_name=machine.name,
                     process_stage=machine.process_stage,
+                    process_stream=_process_stream_for_stage(machine.process_stage),
                     throughput_factor_t_stage_per_t_output=factor,
                     actual_throughput_tph=actual_throughput,
                     effective_capacity_tph=effective_capacity,
@@ -437,8 +737,26 @@ class Engine:
             )
             log(
                 "FLOW",
-                machine.machine_id,
-                f"stage={actual_throughput:.2f} t/h capacity={effective_capacity:.2f} t/h load={load_percent:.1f}% factor={factor:.4f}",
+                node_id,
+                f"machine={machine.name} stage={machine.process_stage} stream={_process_stream_for_stage(machine.process_stage)} throughput={actual_throughput:.2f} t/h "
+                f"capacity={effective_capacity:.2f} t/h load={load_percent:.1f}% factor={factor:.4f} "
+                f"electricity={electricity_contribution:.3f} kWh/t output thermal={thermal_contribution:.3f} kcal/kg output",
+            )
+            trace(
+                "route execution",
+                f"Execute {machine.process_stage} node",
+                "required stage t/h=output t/h×stage factor; effective capacity=min(rated×availability, stable max); energy=specific energy×stage factor",
+                {
+                    "machine": machine.name,
+                    "output_tph": output,
+                    "stage_factor": factor,
+                    "rated_capacity_tph": machine.rated_capacity_tph,
+                    "availability": machine.availability,
+                    "specific_electricity_kwh_t": machine.specific_electricity_kwh_t,
+                    "specific_heat_kcal_kg": machine.specific_heat_kcal_kg,
+                },
+                f"stage={actual_throughput:.3f} t/h; load={load_percent:.2f}%; kWh/t output={electricity_contribution:.4f}; kcal/kg output={thermal_contribution:.4f}",
+                route_node_id=node_id,
             )
             if not run_blocked and factor > 0 and actual_throughput < machine.minimum_stable_tph:
                 validate(
@@ -552,7 +870,14 @@ class Engine:
         for component in preview.flattened_components:
             material = materials[component.material_id]
             fraction = component.percentage / 100.0
-            tonnes_per_t_output = fraction * material_input_factor
+            stream_factor = (
+                1.0 / max(effective_yield, 1e-9)
+                if component.production_stream == "clinker_raw_feed"
+                else material_input_factor
+                if blend.blend_class == "raw_meal" and output_product == "clinker"
+                else 1.0
+            )
+            tonnes_per_t_output = fraction * stream_factor
             unit_cost, cost_basis = applied_material_cost(material)
             contribution = (
                 unit_cost * tonnes_per_t_output if unit_cost is not None else None
@@ -573,6 +898,7 @@ class Engine:
             material_metrics.append(
                 MaterialRunMetric(
                     material_id=material.material_id,
+                    production_stream=component.production_stream,
                     material_name=material.name,
                     material_type=material.material_type,
                     percentage=component.percentage,
@@ -774,6 +1100,16 @@ class Engine:
                     basis="Material minimum/typical/maximum chemistry selection",
                 ),
                 AssumptionRecord(
+                    key="route_graph_algorithm",
+                    value="Kahn topological sort + DAG dynamic programming",
+                    basis="Pure deterministic route ordering and critical-path analysis",
+                ),
+                AssumptionRecord(
+                    key="clinker_mineralogy_method",
+                    value="ASTM-style Bogue potential phases" if clinker_mineralogy else "Not applicable",
+                    basis="Loss-free clinker oxide screening; not a substitute for XRD/Rietveld",
+                ),
+                AssumptionRecord(
                     key="grinding_capacity_factor",
                     value=f"{grinding_capacity_factor:.4f}",
                     basis=(
@@ -838,6 +1174,13 @@ class Engine:
             derived_raw_meal_to_clinker_yield=derived_yield,
             fuel_ash_contribution_kg_t_clinker=fuel_ash_contribution,
             fuel_ash_adjusted_chemistry=fuel_ash_adjusted_chemistry,
+            clinker_chemistry=clinker_chemistry,
+            clinker_lsf=clinker_lsf,
+            clinker_silica_modulus=clinker_sm,
+            clinker_alumina_modulus=clinker_am,
+            clinker_mineralogy=clinker_mineralogy,
+            clinker_behaviour=clinker_behaviour,
+            calculation_trace=calculation_trace,
             grinding_capacity_factor=grinding_capacity_factor,
             grinding_energy_factor=grinding_energy_factor,
             lsf=lsf,
@@ -848,7 +1191,7 @@ class Engine:
             bottleneck_machine_name=bottleneck_machine.name,
             achievable_output_tph=output,
             total_output_tonnes=total_output,
-            material_input_t_per_t_output=material_input_factor,
+            material_input_t_per_t_output=(total_material_input_tph / output if output > 0 else None),
             total_material_input_tph=total_material_input_tph,
             total_material_input_tonnes=total_material_input_tonnes,
             electricity_kwh_t=electricity,

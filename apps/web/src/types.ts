@@ -78,6 +78,12 @@ export type ResolvedBlendComponent = {
   percentage: number;
   evidence_class: string;
   material_version: number;
+  production_stream: string;
+  root_component_type: "material" | "blend";
+  root_component_id: string | null;
+  root_component_name: string | null;
+  root_blend_class: string | null;
+  hierarchy_path: string[];
 };
 
 export type BlendPreview = {
@@ -147,6 +153,19 @@ export type Route = {
   }[];
 };
 
+export type RouteGraphAnalysis = {
+  acyclic: boolean;
+  topological_order: string[];
+  source_nodes: string[];
+  sink_nodes: string[];
+  critical_path_node_ids: string[];
+  critical_path_labels: string[];
+  graph_depth: number;
+  critical_path_hours_per_t_output: number | null;
+  algorithm: string;
+  warnings: string[];
+};
+
 export type RouteAnalysis = {
   route_id: string;
   route_name: string;
@@ -155,8 +174,18 @@ export type RouteAnalysis = {
   flow_summary: string;
   compatible: boolean;
   compatibility_score: number;
+  efficiency_score: number;
   predicted_output_tph: number | null;
   bottleneck_machine_name: string | null;
+  electricity_kwh_t_output: number | null;
+  thermal_kcal_kg_output: number | null;
+  weighted_availability: number | null;
+  mean_technology_readiness_level: number | null;
+  graph: RouteGraphAnalysis | null;
+  pareto_efficient: boolean;
+  distance_from_selected: number | null;
+  improves_selected: boolean;
+  improvement_reasons: string[];
   required_stages: string[];
   present_stages: string[];
   missing_stages: string[];
@@ -169,6 +198,8 @@ export type RouteRecommendationSet = {
   target_output_tph: number;
   selected_route_id: string | null;
   selected: RouteAnalysis | null;
+  nearest_more_efficient_route_id: string | null;
+  algorithm: string;
   recommendations: RouteAnalysis[];
 };
 
@@ -207,6 +238,59 @@ export type CostBook = {
   notes?: string | null;
 };
 
+
+export type ClinkerFamily =
+  | "moduli_only"
+  | "general_purpose"
+  | "high_early_strength"
+  | "durable_belite"
+  | "sulfate_resistant"
+  | "low_carbon_belite"
+  | "lc3_compatible"
+  | "custom";
+
+export type CalculationTraceStep = {
+  sequence: number;
+  section: string;
+  operation: string;
+  formula: string;
+  inputs: Record<string, number | string | null>;
+  result: number | string | null;
+  unit: string | null;
+  route_node_id: string | null;
+};
+
+export type ClinkerMineralogy = {
+  method: string;
+  calculation_basis: string;
+  c3s_percent: number | null;
+  c2s_percent: number | null;
+  c3a_percent: number | null;
+  c4af_percent: number | null;
+  calcium_aluminoferrite_ss_percent: number | null;
+  phase_total_percent: number | null;
+  unallocated_percent: number | null;
+  alumina_ferric_ratio: number | null;
+  estimated_uncertainty_1sigma: Record<string, number>;
+  warnings: string[];
+};
+
+export type ClinkerBehaviour = {
+  method: string;
+  liquid_phase_1450_percent: number | null;
+  burnability_score: number | null;
+  burnability_class: "good" | "moderate" | "difficult" | "unknown";
+  free_lime_risk: "low" | "medium" | "high" | "unknown";
+  expected_fuel_demand: "low" | "medium" | "high" | "unknown";
+  expected_early_strength: "low" | "medium" | "high" | "unknown";
+  expected_later_strength: "low" | "medium" | "high" | "unknown";
+  expected_sulfate_resistance: "low" | "moderate" | "high" | "unknown";
+  expected_heat_release: "low" | "moderate" | "high" | "unknown";
+  predicted_family: ClinkerFamily | null;
+  family_distance: number | null;
+  rationale: string[];
+};
+
 export type ValidationMessage = {
   severity: "block" | "warning" | "info";
   code: string;
@@ -215,6 +299,7 @@ export type ValidationMessage = {
 
 export type MachineRunMetric = {
   node_id: string;
+  process_stream: string;
   machine_id: string;
   machine_name: string;
   process_stage: string;
@@ -231,6 +316,7 @@ export type MachineRunMetric = {
 
 export type MaterialRunMetric = {
   material_id: string;
+  production_stream: string;
   material_name: string;
   material_type: string;
   percentage: number;
@@ -282,6 +368,13 @@ export type Result = {
   derived_raw_meal_to_clinker_yield: number | null;
   fuel_ash_contribution_kg_t_clinker: number | null;
   fuel_ash_adjusted_chemistry: Chemistry | null;
+  clinker_chemistry: Chemistry | null;
+  clinker_lsf: number | null;
+  clinker_silica_modulus: number | null;
+  clinker_alumina_modulus: number | null;
+  clinker_mineralogy: ClinkerMineralogy | null;
+  clinker_behaviour: ClinkerBehaviour | null;
+  calculation_trace: CalculationTraceStep[];
   grinding_capacity_factor: number;
   grinding_energy_factor: number;
   achievable_output_tph: number;
@@ -375,11 +468,16 @@ export type RawMixResult = {
   feasible: boolean;
   suggestions: { material_id: string; material_name: string; percentage: number }[];
   chemistry: Chemistry;
+  clinker_chemistry: Chemistry | null;
+  mineralogy: ClinkerMineralogy | null;
+  behaviour: ClinkerBehaviour | null;
+  clinker_family: ClinkerFamily;
   lsf: number | null;
   silica_modulus: number | null;
   alumina_modulus: number | null;
   estimated_clinker_yield: number | null;
   objective_error: number;
+  calculation_trace: CalculationTraceStep[];
   warnings: string[];
 };
 

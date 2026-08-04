@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { req } from "./api";
-import type { Blend, Calibration, Material, RawMixResult, Result } from "./types";
+import type { Blend, Calibration, ClinkerFamily, Material, RawMixResult, Result } from "./types";
 
 type Constraint = {
   material_id: string;
@@ -14,6 +14,29 @@ type BlendComponentPayload = {
   material_id: string;
   blend_id: null;
   percentage: number;
+};
+
+
+type FamilyPreset = {
+  label: string;
+  lsf: number;
+  sm: number;
+  am: number;
+  c3s: number | null;
+  c2s: number | null;
+  c3a: number | null;
+  c4af: number | null;
+};
+
+const FAMILY_PRESETS: Record<ClinkerFamily, FamilyPreset> = {
+  moduli_only: { label: "Moduli only / legacy mode", lsf: 95, sm: 2.5, am: 1.5, c3s: null, c2s: null, c3a: null, c4af: null },
+  general_purpose: { label: "General-purpose clinker", lsf: 96, sm: 2.4, am: 1.5, c3s: 60, c2s: 20, c3a: 8, c4af: 10 },
+  high_early_strength: { label: "High early strength", lsf: 98, sm: 2.3, am: 1.4, c3s: 66, c2s: 14, c3a: 8, c4af: 10 },
+  durable_belite: { label: "Durable / belite-rich", lsf: 94.5, sm: 2.45, am: 1.35, c3s: 52, c2s: 29, c3a: 7, c4af: 11 },
+  sulfate_resistant: { label: "Sulfate resistant", lsf: 95, sm: 2.5, am: 0.95, c3s: 55, c2s: 25, c3a: 4, c4af: 14 },
+  low_carbon_belite: { label: "Lower-carbon belite-rich", lsf: 92.5, sm: 2.45, am: 1.3, c3s: 44, c2s: 37, c3a: 7, c4af: 10 },
+  lc3_compatible: { label: "LC3-compatible screening", lsf: 95, sm: 2.35, am: 1.25, c3s: 55, c2s: 25, c3a: 7, c4af: 12 },
+  custom: { label: "Custom phase target", lsf: 95, sm: 2.5, am: 1.5, c3s: 60, c2s: 20, c3a: 8, c4af: 10 },
 };
 
 function nullable(value: string): number | null {
@@ -80,6 +103,11 @@ export function AccuracyWorkspace({
   const [lsf, setLsf] = useState(95);
   const [sm, setSm] = useState(2.5);
   const [am, setAm] = useState(1.5);
+  const [family, setFamily] = useState<ClinkerFamily>("general_purpose");
+  const [targetC3s, setTargetC3s] = useState<number | null>(60);
+  const [targetC2s, setTargetC2s] = useState<number | null>(20);
+  const [targetC3a, setTargetC3a] = useState<number | null>(8);
+  const [targetC4af, setTargetC4af] = useState<number | null>(10);
   const [scenario, setScenario] = useState("typical");
   const [result, setResult] = useState<RawMixResult | null>(null);
   const [error, setError] = useState("");
@@ -153,6 +181,18 @@ export function AccuracyWorkspace({
       .catch(() => undefined);
   }, [runs]);
 
+  function applyFamily(nextFamily: ClinkerFamily) {
+    const preset = FAMILY_PRESETS[nextFamily];
+    setFamily(nextFamily);
+    setLsf(preset.lsf);
+    setSm(preset.sm);
+    setAm(preset.am);
+    setTargetC3s(preset.c3s);
+    setTargetC2s(preset.c2s);
+    setTargetC3a(preset.c3a);
+    setTargetC4af(preset.c4af);
+  }
+
   async function optimise() {
     setError("");
     setResult(null);
@@ -164,12 +204,21 @@ export function AccuracyWorkspace({
           target_lsf: lsf,
           target_sm: sm,
           target_am: am,
+          clinker_family: family,
+          target_c3s_percent: targetC3s,
+          target_c2s_percent: targetC2s,
+          target_c3a_percent: targetC3a,
+          target_c4af_percent: targetC4af,
           chemistry_scenario: scenario,
         }),
       });
       setResult(nextResult);
-      setBlendName(`Optimised raw meal LSF ${lsf.toFixed(1)} / ${scenario}`);
-      setBlendObjective(`Target LSF ${lsf}, SM ${sm}, AM ${am}`);
+      setBlendName(`${FAMILY_PRESETS[family].label} raw meal / ${scenario}`);
+      setBlendFamily(FAMILY_PRESETS[family].label);
+      setBlendObjective(
+        `Target LSF ${lsf}, SM ${sm}, AM ${am}`
+        + (targetC3s === null ? "" : `; potential phases C3S ${targetC3s}, C2S ${targetC2s}, C3A ${targetC3a}, C4AF ${targetC4af}`),
+      );
     } catch (caught) {
       setError(String(caught));
     }
@@ -240,12 +289,27 @@ export function AccuracyWorkspace({
 
       {mode === "rawmix" ? (
         <div className="composer">
-          <h2>GUIDE / RAW-MIX MODULI OPTIMISER</h2>
+          <h2>GUIDE / CLINKER ENGINEERING OPTIMISER</h2>
           <p className="management-note">
-            Choose actual quarry/corrective records and bounds. The solver transfers mass
-            between them until LSF, SM and AM are as close as the material chemistry permits.
-            It does not replace raw-mill XRF control.
+            Choose actual quarry/corrective records and bounds. A deterministic pairwise mass-transfer solver
+            minimises moduli error and, when selected, potential Bogue-phase error. The result is a screening
+            design—not a substitute for kiln trials, free-lime testing, microscopy, or XRD/Rietveld analysis.
           </p>
+
+          <div className="form-grid two">
+            <label>
+              CLINKER ENGINEERING OBJECTIVE
+              <select value={family} onChange={(event) => applyFamily(event.target.value as ClinkerFamily)}>
+                {Object.entries(FAMILY_PRESETS).map(([key, preset]) => (
+                  <option value={key} key={key}>{preset.label}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              SOLVER
+              <input value="Deterministic bounded coordinate descent" disabled />
+            </label>
+          </div>
 
           <div className="form-grid four">
             <label>
@@ -269,6 +333,28 @@ export function AccuracyWorkspace({
               </select>
             </label>
           </div>
+
+          <div className="form-grid four">
+            <label>
+              TARGET C₃S / ALITE %
+              <input type="number" step="0.1" disabled={family === "moduli_only"} value={targetC3s ?? ""} onChange={(event) => setTargetC3s(event.target.value === "" ? null : Number(event.target.value))} />
+            </label>
+            <label>
+              TARGET C₂S / BELITE %
+              <input type="number" step="0.1" disabled={family === "moduli_only"} value={targetC2s ?? ""} onChange={(event) => setTargetC2s(event.target.value === "" ? null : Number(event.target.value))} />
+            </label>
+            <label>
+              TARGET C₃A %
+              <input type="number" step="0.1" disabled={family === "moduli_only"} value={targetC3a ?? ""} onChange={(event) => setTargetC3a(event.target.value === "" ? null : Number(event.target.value))} />
+            </label>
+            <label>
+              TARGET C₄AF / FERRITE %
+              <input type="number" step="0.1" disabled={family === "moduli_only"} value={targetC4af ?? ""} onChange={(event) => setTargetC4af(event.target.value === "" ? null : Number(event.target.value))} />
+            </label>
+          </div>
+          <p className="management-note">
+            Family presets are editable screening envelopes. Bogue phases are calculated on a loss-free clinker basis and carry substantial model uncertainty.
+          </p>
 
           <div className="section-heading">
             <span>CANDIDATE MATERIAL BOUNDS</span>
@@ -395,6 +481,47 @@ export function AccuracyWorkspace({
                   {item.material_name}: {item.percentage.toFixed(3)}%
                 </span>
               ))}
+              {result.mineralogy && (
+                <>
+                  <div className="section-heading">
+                    <span>PREDICTED CLINKER MINERALOGY / BOGUE POTENTIAL PHASES</span>
+                    <span>{FAMILY_PRESETS[result.clinker_family].label}</span>
+                  </div>
+                  <div className="chemistry-grid">
+                    <div><small>C₃S / ALITE</small><strong>{result.mineralogy.c3s_percent?.toFixed(2) ?? "N/A"}%</strong></div>
+                    <div><small>C₂S / BELITE</small><strong>{result.mineralogy.c2s_percent?.toFixed(2) ?? "N/A"}%</strong></div>
+                    <div><small>C₃A</small><strong>{result.mineralogy.c3a_percent?.toFixed(2) ?? "N/A"}%</strong></div>
+                    <div><small>C₄AF / FERRITE</small><strong>{(result.mineralogy.c4af_percent ?? result.mineralogy.calcium_aluminoferrite_ss_percent)?.toFixed(2) ?? "N/A"}%</strong></div>
+                  </div>
+                  <span>
+                    Potential phase total {result.mineralogy.phase_total_percent?.toFixed(2) ?? "N/A"}% · unallocated {result.mineralogy.unallocated_percent?.toFixed(2) ?? "N/A"}% · A/F {result.mineralogy.alumina_ferric_ratio?.toFixed(3) ?? "N/A"}
+                  </span>
+                </>
+              )}
+              {result.behaviour && (
+                <div className="key-values">
+                  <span>Burnability screening</span><strong>{result.behaviour.burnability_class.toUpperCase()} · {result.behaviour.burnability_score?.toFixed(1) ?? "N/A"}/100</strong>
+                  <span>Liquid phase proxy / 1450 °C</span><strong>{result.behaviour.liquid_phase_1450_percent?.toFixed(2) ?? "N/A"}%</strong>
+                  <span>Free-lime risk</span><strong>{result.behaviour.free_lime_risk.toUpperCase()}</strong>
+                  <span>Expected fuel demand</span><strong>{result.behaviour.expected_fuel_demand.toUpperCase()}</strong>
+                  <span>Expected early strength</span><strong>{result.behaviour.expected_early_strength.toUpperCase()}</strong>
+                  <span>Expected later strength</span><strong>{result.behaviour.expected_later_strength.toUpperCase()}</strong>
+                  <span>Expected sulfate resistance</span><strong>{result.behaviour.expected_sulfate_resistance.toUpperCase()}</strong>
+                  <span>Nearest family</span><strong>{result.behaviour.predicted_family ? FAMILY_PRESETS[result.behaviour.predicted_family].label : "N/A"}</strong>
+                </div>
+              )}
+              <details>
+                <summary>CALCULATION TRACE / {result.calculation_trace.length} DETERMINISTIC STEPS</summary>
+                <div className="audit-list">
+                  {result.calculation_trace.map((step) => (
+                    <p key={step.sequence}>
+                      <code>{step.sequence}. {step.section}</code>
+                      <strong>{step.operation}</strong>
+                      <span>{step.formula}<br />Inputs: {JSON.stringify(step.inputs)}<br />Result: {String(step.result ?? "N/A")} {step.unit ?? ""}</span>
+                    </p>
+                  ))}
+                </div>
+              </details>
               {result.warnings.map((warning) => (
                 <span className="warn-text" key={warning}>{warning}</span>
               ))}
