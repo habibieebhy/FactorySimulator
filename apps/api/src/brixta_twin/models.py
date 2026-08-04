@@ -827,7 +827,7 @@ class RetrofitObjectiveWeights(BaseModel):
 
 
 def default_retrofit_objective_weights() -> RetrofitObjectiveWeights:
-    """Return a fresh, fully typed default objective-weight model."""
+    """Return a fresh, fully typed objective-weight model."""
 
     return RetrofitObjectiveWeights(
         cost=1.0,

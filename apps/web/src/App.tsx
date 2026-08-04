@@ -16,6 +16,7 @@ import { BlendWorkspace } from "./BlendWorkspace";
 import { CostBookWorkspace } from "./CostBookWorkspace";
 import { LibraryManager } from "./LibraryManager";
 import { RouteWorkspace } from "./RouteWorkspace";
+import { RetrofitWorkspace } from "./RetrofitWorkspace";
 import type { Blend, CostBook, Machine, Material, QualityMeasurements, Result, Route, RouteRecommendationSet } from "./types";
 
 function number(value: number | null, unit: string, digits = 1): string {
@@ -256,7 +257,7 @@ export function App() {
         <b>BRIXTA CEMENT TWIN LAB</b>
         <span>{result?.run_id ?? "NO ACTIVE RUN"}</span>
         <nav>
-          {["console", "blend", "machine", "route", "accuracy", "costs", "runs", "library"].map((item) => (
+          {["console", "blend", "retrofit", "machine", "route", "accuracy", "costs", "runs", "library"].map((item) => (
             <button className={view === item ? "selected" : ""} onClick={() => setView(item)} key={item}>{item.toUpperCase()}</button>
           ))}
         </nav>
@@ -346,6 +347,7 @@ export function App() {
       )}
 
       {view === "blend" && <BlendWorkspace materials={materials} blends={blends} onMaterialCreated={(material) => setMaterials((current) => [...current, material])} onBlendCreated={(blend) => { setBlends((current) => [...current, blend]); setBlendId(blend.blend_id); setView("console"); }} />}
+      {view === "retrofit" && <RetrofitWorkspace materials={materials} blends={blends} routes={routes} costBooks={costBooks} onBlendCreated={(blend) => { setBlends((current) => [...current, blend]); setBlendId(blend.blend_id); }} />}
       {view === "machine" && <MachineGuide done={(machine) => { setMachines((current) => [...current, machine]); setView("route"); }} />}
       {view === "route" && <RouteWorkspace machines={machines} routes={routes} done={(newRoute) => { setRoutes((current) => [...current, newRoute]); setRouteId(newRoute.route_id); setView("console"); }} />}
       {view === "accuracy" && <AccuracyWorkspace materials={materials} runs={runs} blendCreated={(blend) => { setBlends((current) => [...current, blend]); setBlendId(blend.blend_id); setView("console"); }} />}

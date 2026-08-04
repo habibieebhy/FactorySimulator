@@ -495,3 +495,163 @@ export type Calibration = {
   note?: string | null;
   errors: { metric: string; simulated: number | null; actual: number | null; absolute_error: number | null; percent_error: number | null }[];
 };
+
+export type RetrofitReference = {
+  component_type: "material" | "blend";
+  reference_id: string;
+};
+
+export type PercentageBounds = {
+  minimum_percent: number;
+  maximum_percent: number;
+};
+
+export type RetrofitObjectiveWeights = {
+  cost: number;
+  co2: number;
+  output: number;
+  electricity: number;
+  thermal: number;
+  robustness: number;
+  retrofit_complexity: number;
+  clinker_factor: number;
+};
+
+export type RetrofitComponentShare = {
+  role: "clinker" | "calcined_clay" | "limestone" | "gypsum";
+  component_type: "material" | "blend";
+  reference_id: string;
+  name: string;
+  percentage: number;
+  minimum_percent: number;
+  maximum_percent: number;
+  source_status: string;
+};
+
+export type RetrofitAssetGap = {
+  asset_code: string;
+  asset_name: string;
+  requirement: "required" | "recommended" | "optional";
+  reason: string;
+  reference_capacity_tph: number | null;
+  reference_capex_inr_crore: number | null;
+  assumption_basis: string;
+};
+
+export type RetrofitStressScenario = {
+  scenario: string;
+  chemistry_scenario: "low" | "typical" | "high";
+  clinker_percent: number;
+  calcined_clay_percent: number;
+  limestone_percent: number;
+  gypsum_percent: number;
+  predicted_output_tph: number | null;
+  electricity_kwh_t: number | null;
+  thermal_kcal_kg: number | null;
+  material_cost_inr_t: number | null;
+  total_variable_cost_inr_t: number | null;
+  material_co2_kg_t: number | null;
+  chemistry_complete: boolean;
+  unknown_chemistry_fields: string[];
+  feasible: boolean;
+  notes: string[];
+};
+
+export type FormulationStageResult = {
+  level: string;
+  name: string;
+  purpose: string;
+  inputs: string[];
+  outputs: string[];
+  key_results: Record<string, number | string | null>;
+  assumptions: string[];
+};
+
+export type RetrofitCandidate = {
+  candidate_id: string;
+  name: string;
+  components: RetrofitComponentShare[];
+  feasible: boolean;
+  pareto_efficient: boolean;
+  rank: number | null;
+  deterministic_score: number;
+  predicted_output_tph: number | null;
+  output_shortfall_tph: number;
+  output_delta_vs_ppc_tph: number | null;
+  electricity_delta_vs_ppc_kwh_t: number | null;
+  thermal_delta_vs_ppc_kcal_kg: number | null;
+  material_cost_delta_vs_ppc_inr_t: number | null;
+  material_co2_delta_vs_ppc_kg_t: number | null;
+  bottleneck_machine_name: string | null;
+  route_compatibility_score: number;
+  route_efficiency_score: number;
+  electricity_kwh_t: number | null;
+  thermal_kcal_kg: number | null;
+  material_cost_inr_t: number | null;
+  energy_cost_inr_t: number | null;
+  total_variable_cost_inr_t: number | null;
+  material_co2_kg_t: number | null;
+  clinker_factor_percent: number;
+  robustness_score: number;
+  retrofit_complexity_score: number;
+  chemistry: Chemistry;
+  chemistry_complete: boolean;
+  unknown_chemistry_fields: string[];
+  missing_assets: RetrofitAssetGap[];
+  stress_tests: RetrofitStressScenario[];
+  formulation_chain: FormulationStageResult[];
+  warnings: string[];
+  calculation_trace: CalculationTraceStep[];
+};
+
+export type RetrofitStudyResult = {
+  study_id: string;
+  created_at: string;
+  calculation_version: string;
+  study_type: "ppc_to_lc3";
+  request: {
+    existing_ppc_blend_id: string;
+    route_id: string;
+    cost_book_id: string | null;
+    target_output_tph: number;
+    clinker_source: RetrofitReference | null;
+    calcined_clay_source: RetrofitReference | null;
+    limestone_source: RetrofitReference | null;
+    gypsum_source: RetrofitReference | null;
+    clay_supply_mode: "purchased_calcined_clay" | "onsite_calcination";
+    raw_clay_material_id: string | null;
+    clinker_bounds: PercentageBounds;
+    calcined_clay_bounds: PercentageBounds;
+    limestone_bounds: PercentageBounds;
+    gypsum_bounds: PercentageBounds;
+    clay_to_limestone_ratio_min: number;
+    clay_to_limestone_ratio_max: number;
+    raw_clay_to_calcined_yield: number;
+    calcined_clay_reactivity_index: number;
+    clay_kaolinite_percent: number;
+    reference_clay_calciner_capacity_tph: number;
+    reference_clay_calciner_electricity_kwh_t: number;
+    reference_clay_calciner_thermal_kcal_kg: number;
+    objective_weights: RetrofitObjectiveWeights;
+    target_candidates: number;
+  };
+  baseline: {
+    blend_id: string;
+    blend_name: string;
+    family: string;
+    route_id: string;
+    route_name: string;
+    predicted_output_tph: number | null;
+    electricity_kwh_t: number | null;
+    thermal_kcal_kg: number | null;
+    material_cost_inr_t: number | null;
+    material_co2_kg_t: number | null;
+    warnings: string[];
+  };
+  selected_candidate_id: string | null;
+  candidates: RetrofitCandidate[];
+  algorithm: string;
+  assumptions: { key: string; value: string; basis: string }[];
+  data_to_replace: string[];
+  warnings: string[];
+};

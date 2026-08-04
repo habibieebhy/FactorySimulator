@@ -38,6 +38,7 @@ from .models import (
     now,
 )
 from .excel_compiler import compile_retrofit_workbook
+from .engineering_router import build_engineering_router
 from .optimisation import optimise_raw_mix
 from .retrofit import PpcToLc3Designer
 from .routing import recommend_routes
@@ -54,13 +55,14 @@ def create_app(path: str | Path | None = None) -> FastAPI:
     seed(repo)
     engine = Engine(repo)
     retrofit_designer = PpcToLc3Designer(repo)
-    app = FastAPI(title="BRIXTA Cement Twin API", version="0.8.0")
+    app = FastAPI(title="BRIXTA Cement Twin API", version="0.9.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.include_router(build_engineering_router(repo))
 
     def active(table: str, include_archived: bool) -> list[BaseModel]:
         items = repo.list(table)
@@ -95,7 +97,7 @@ def create_app(path: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "service": "brixta-cement-twin-api", "version": "0.8.0"}
+        return {"status": "ok", "service": "brixta-cement-twin-api", "version": "0.9.0"}
 
     @app.get("/api/materials", response_model=list[Material])
     def materials(include_archived: bool = Query(False)) -> list[BaseModel]:

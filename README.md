@@ -6,9 +6,7 @@
 **Document edition:** 1.0 - 2 August 2026  
 **Primary purpose:** controlled cement recipe, process-route and equipment scenario screening  
 **Audience:** founders, plant engineers, cement technologists, research partners, laboratory teams and investment reviewers
-**This is how you start it in VScode:**
-python -m uvicorn brixta_twin.app:app --reload --port 8100
-vite: npm run dev INSIDE THE web/
+
 ---
 
 ## Read this first
@@ -1061,4 +1059,29 @@ Priority improvements for the simulator:
 The value of BRIXTA Cement Twin Lab is not that it makes every answer look precise. Its value is that it makes every assumption, version, dependency, warning and evidence source visible.
 
 Use it to narrow thousands of possibilities into a small number of controlled, testable and economically interesting candidates. Then let laboratory testing, plant trials, commercial evidence and independent engineering review decide what deserves investment.
+
+
+# BRIXTA PPC-to-LC3 Retrofit Designer v0.8.0
+
+Replace the files in this package at the same paths in your current BRIXTA project.
+
+## Backend
+
+```bash
+cd ~/brixta-cement-twin
+source .venv/bin/activate
+pip install -e './apps/api[dev]'
+uvicorn brixta_twin.app:create_app --factory --app-dir apps/api/src --reload --port 8100
+```
+
+## Frontend
+
+```bash
+cd ~/brixta-cement-twin/apps/web
+npm install
+npm run dev
+```
+
+Open the new **RETROFIT** workspace.
+
 
