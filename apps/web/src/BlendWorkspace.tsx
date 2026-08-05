@@ -120,13 +120,19 @@ export function BlendWorkspace({
   blends,
   onBlendCreated,
   onMaterialCreated,
+  initialMode = "blend",
 }: {
   materials: Material[];
   blends: Blend[];
   onBlendCreated: (blend: Blend) => void;
   onMaterialCreated: (material: Material) => void;
+  initialMode?: "blend" | "material";
 }) {
-  const [mode, setMode] = useState<"blend" | "material">("blend");
+  const [mode, setMode] = useState<"blend" | "material">(initialMode);
+
+  useEffect(() => {
+    setMode(initialMode);
+  }, [initialMode]);
   return (
     <section className="guide wide-guide">
       <div className="subnav" role="tablist" aria-label="Blend workspace">

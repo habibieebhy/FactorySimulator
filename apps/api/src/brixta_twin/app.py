@@ -55,7 +55,7 @@ def create_app(path: str | Path | None = None) -> FastAPI:
     seed(repo)
     engine = Engine(repo)
     retrofit_designer = PpcToLc3Designer(repo)
-    app = FastAPI(title="BRIXTA Cement Twin API", version="0.9.0")
+    app = FastAPI(title="BRIXTA Cement Twin API", version="1.0.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -97,7 +97,7 @@ def create_app(path: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "service": "brixta-cement-twin-api", "version": "0.9.0"}
+        return {"status": "ok", "service": "brixta-cement-twin-api", "version": "1.0.0"}
 
     @app.get("/api/materials", response_model=list[Material])
     def materials(include_archived: bool = Query(False)) -> list[BaseModel]:

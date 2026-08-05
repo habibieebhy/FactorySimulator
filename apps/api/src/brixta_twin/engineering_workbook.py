@@ -28,6 +28,8 @@ def compile_engineering_workbook(
     are formulas, and green cells contain recorded plant/laboratory actuals.
     """
 
+    if case.trust_assessment is None or case.decision_gate is None:
+        raise ValueError("Engineering workbook requires a version 1.0.0 trust assessment and decision gate")
     validations = validations or []
     output = BytesIO()
     workbook = xlsxwriter.Workbook(output, {"in_memory": True})
@@ -54,6 +56,11 @@ def compile_engineering_workbook(
             "02_ASSUMPTIONS",
             "03_MISSING_DATA",
             "04_EXECUTIVE_SUMMARY",
+            "05_TRUST_SUMMARY",
+            "06_EVIDENCE_REGISTER",
+            "07_CONFIDENCE_REGISTER",
+            "08_RISK_REGISTER",
+            "09_REVIEW_COMMITTEE",
             "10_RAW_MATERIALS",
             "11_XRF",
             "12_XRD",
@@ -78,6 +85,7 @@ def compile_engineering_workbook(
             "39_CARBON",
             "40_SENSITIVITY",
             "41_SCENARIO_COMPARE",
+            "42_SCENARIO_RATIONALE",
             "50_PLANT_ACTUALS",
             "51_LAB_RESULTS",
             "52_XRF_COMPARISON",
@@ -93,9 +101,14 @@ def compile_engineering_workbook(
             "62_ENGINEER_SIGNOFF",
             "63_QUALITY_SIGNOFF",
             "64_PLANT_SIGNOFF",
+            "65_VALIDATION_MATRIX",
+            "66_OPERATOR_CHECKLIST",
+            "67_ROLLBACK",
             "70_DECISION",
             "71_PILOT_BATCH",
             "72_LEARNING",
+            "73_LESSONS_LEARNED",
+            "74_VERSION_HISTORY",
         ]
     }
 
@@ -115,6 +128,11 @@ def compile_engineering_workbook(
     _write_assumptions(sheets["02_ASSUMPTIONS"], case, formats)
     _write_missing_data(sheets["03_MISSING_DATA"], case, formats)
     _write_executive(sheets["04_EXECUTIVE_SUMMARY"], case, formats)
+    _write_trust_summary(sheets["05_TRUST_SUMMARY"], case, formats)
+    _write_evidence_register(sheets["06_EVIDENCE_REGISTER"], case, formats)
+    _write_confidence_register(sheets["07_CONFIDENCE_REGISTER"], case, formats)
+    _write_risk_register(sheets["08_RISK_REGISTER"], case, formats)
+    _write_review_committee(sheets["09_REVIEW_COMMITTEE"], case, formats)
     material_rows = _write_raw_materials(
         sheets["10_RAW_MATERIALS"], repository, candidate, cost_book, formats
     )
@@ -145,6 +163,7 @@ def compile_engineering_workbook(
     _write_carbon(sheets["39_CARBON"], candidate, material_rows, formats)
     _write_sensitivity(sheets["40_SENSITIVITY"], candidate, formats)
     _write_scenarios(sheets["41_SCENARIO_COMPARE"], study, formats)
+    _write_scenario_rationale(sheets["42_SCENARIO_RATIONALE"], case, formats)
     _write_plant_actuals(sheets["50_PLANT_ACTUALS"], validations, formats)
     _write_lab_results(sheets["51_LAB_RESULTS"], validations, formats)
     _write_xrf_comparison(sheets["52_XRF_COMPARISON"], formats)
@@ -160,9 +179,14 @@ def compile_engineering_workbook(
     _write_signoff(sheets["62_ENGINEER_SIGNOFF"], "Engineer", validations, formats)
     _write_signoff(sheets["63_QUALITY_SIGNOFF"], "Quality Head", validations, formats)
     _write_signoff(sheets["64_PLANT_SIGNOFF"], "Plant Head", validations, formats)
+    _write_validation_matrix(sheets["65_VALIDATION_MATRIX"], case, formats)
+    _write_operator_checklist(sheets["66_OPERATOR_CHECKLIST"], case, formats)
+    _write_rollback(sheets["67_ROLLBACK"], case, formats)
     _write_decision(sheets["70_DECISION"], case, formats)
     _write_pilot(sheets["71_PILOT_BATCH"], case, formats)
     _write_learning(sheets["72_LEARNING"], case, validations, formats)
+    _write_lessons_learned(sheets["73_LESSONS_LEARNED"], case, validations, formats)
+    _write_version_history(sheets["74_VERSION_HISTORY"], case, formats)
 
     workbook.close()
     return output.getvalue()
@@ -1250,20 +1274,38 @@ def _write_signoff(
 
 
 def _write_decision(sheet: Worksheet, case: EngineeringCase, formats: FormatMap) -> None:
-    _setup(sheet, [(0, 0, 30), (1, 1, 85)])
-    _title(sheet, "ENGINEERING DECISION", formats, 1)
+    _setup(sheet, [(0, 0, 32), (1, 1, 88)])
+    _title(sheet, "ENGINEERING DECISION GATE", formats, 1)
+    gate = case.decision_gate
+    if gate is None:
+        raise ValueError("Engineering decision sheet requires a trust decision gate")
+    workbook_decision = "YES — CONTROLLED PILOT ONLY" if gate.pilot_authorised else "NO" if gate.decision == "reject" else "HOLD"
     rows = [
-        ("Should this recommendation proceed?", "HOLD"),
-        ("Reason", case.executive_summary),
+        ("Should this recommendation proceed?", workbook_decision),
+        ("Production change authorised?", "YES" if gate.production_change_authorised else "NO"),
+        ("Controlled pilot authorised?", "YES" if gate.pilot_authorised else "NO"),
+        ("Gate decision", gate.decision.upper()),
+        ("Reason", gate.reason),
         ("Risk", case.risk_rating.upper()),
+        ("Blocking conditions", "\n".join(gate.blocking_conditions) or "None"),
+        ("Conditions to advance", "\n".join(gate.conditions_to_advance)),
+        ("Approval requirements", "\n".join(gate.approval_requirements)),
         ("Required tests", "\n".join(sorted({test for rec in case.recommendations for test in rec.required_validation}))),
         ("Pilot quantity", case.pilot_plan.pilot_quantity_t),
         ("Monitoring plan", "\n".join(case.pilot_plan.monitoring_plan)),
     ]
     for row, item in enumerate(rows, 3):
         sheet.write(row, 0, item[0], formats["label"])
-        sheet.write(row, 1, item[1], formats["warning"] if row in {3, 5} else formats["input"])
-    sheet.data_validation(3, 1, 3, 1, {"validate": "list", "source": ["YES", "NO", "HOLD"]})
+        critical = item[0] in {
+            "Should this recommendation proceed?",
+            "Production change authorised?",
+            "Controlled pilot authorised?",
+            "Gate decision",
+            "Risk",
+            "Blocking conditions",
+        }
+        sheet.write(row, 1, item[1], formats["warning"] if critical else formats["input"])
+    sheet.data_validation(3, 1, 3, 1, {"validate": "list", "source": ["YES — CONTROLLED PILOT ONLY", "NO", "HOLD"]})
 
 
 def _write_pilot(sheet: Worksheet, case: EngineeringCase, formats: FormatMap) -> None:
@@ -1337,3 +1379,301 @@ def _write_learning(
         sheet.write(start + 2, 1, latest.confidence_after_percent, formats["actual"])
     else:
         sheet.merge_range(4, 0, 6, 6, "No pilot/plant actuals have been imported. Enter actuals in the BRIXTA Learning stage or validation sheets.", formats["warning"])
+
+
+def _write_trust_summary(
+    sheet: Worksheet,
+    case: EngineeringCase,
+    formats: FormatMap,
+) -> None:
+    _setup(sheet, [(0, 0, 34), (1, 1, 22), (2, 2, 72)])
+    _title(sheet, "ENGINEERING TRUST SUMMARY", formats, 2)
+    trust = case.trust_assessment
+    gate = case.decision_gate
+    if trust is None or gate is None:
+        raise ValueError("Trust summary requires a version 1.0.0 trust assessment and decision gate")
+    rows = [
+        ("Decision gate", gate.decision.upper(), gate.reason),
+        ("Production change authorised", "YES" if gate.production_change_authorised else "NO", "A calculation or workbook never authorises a production change by itself."),
+        ("Pilot authorised", "YES" if gate.pilot_authorised else "NO", "Controlled pilot eligibility is governed by evidence, validation, review and risk gates."),
+        ("Earned confidence", trust.overall_confidence_percent, trust.confidence_band.upper()),
+        ("Evidence coverage", trust.evidence_coverage_percent, "Quality-weighted evidence register coverage"),
+        ("Data completeness", trust.data_completeness_percent, "Penalty applied for unknown and insufficiently evidenced inputs"),
+        ("Calculation traceability", trust.traceability_percent, "Prediction basis, validation requirements, evidence and calculation trace"),
+        ("Validation readiness", trust.validation_readiness_percent, "Availability of blocking laboratory and plant validation"),
+        ("Critical assumptions", len(trust.critical_assumptions), "Every assumption has consequence and replacement-data instructions"),
+        ("Unknown inputs", len(trust.unknown_inputs), "Unknowns remain explicit; they are never silently converted to zero"),
+        ("Open risks", len(trust.risk_register), "Sorted by risk-priority number"),
+        ("Mandatory reviews", sum(item.mandatory for item in trust.review_committee), "Multidisciplinary committee gate"),
+    ]
+    for row, (label, value, note) in enumerate(rows, 3):
+        sheet.write(row, 0, label, formats["label"])
+        fmt = formats["warning"] if label in {"Decision gate", "Production change authorised", "Pilot authorised"} else formats["number"]
+        sheet.write(row, 1, value, fmt)
+        sheet.write(row, 2, note, formats["text"])
+    start = 17
+    sheet.merge_range(start, 0, start, 2, "FIVE TRUST QUESTIONS", formats["section"])
+    sheet.write_row(start + 1, 0, ["Question", "Status", "Answer"], formats["header"])
+    for offset, item in enumerate(trust.trust_questions, start + 2):
+        sheet.write(offset, 0, item.question, formats["label"])
+        sheet.write(offset, 1, item.status.upper(), formats["good"] if item.status == "adequate" else formats["warning"])
+        sheet.write(offset, 2, item.answer, formats["text"])
+
+
+def _write_evidence_register(
+    sheet: Worksheet,
+    case: EngineeringCase,
+    formats: FormatMap,
+) -> None:
+    _setup(sheet, [(0, 0, 20), (1, 1, 28), (2, 2, 24), (3, 3, 48), (4, 4, 36), (5, 6, 17), (7, 8, 44)])
+    _title(sheet, "EVIDENCE REGISTER", formats, 8)
+    sheet.write_row(3, 0, ["Evidence ID", "Subject", "Class", "Title", "Source URI", "Quality %", "Status", "Applies to", "Limitations"], formats["header"])
+    for row, item in enumerate(case.evidence_register, 4):
+        sheet.write_row(
+            row,
+            0,
+            [
+                item.evidence_id,
+                item.subject,
+                item.evidence_class,
+                item.title,
+                item.source_uri or "",
+                item.quality_score_percent,
+                item.status,
+                "\n".join(item.applies_to),
+                "\n".join(item.limitations),
+            ],
+            formats["text"],
+        )
+        sheet.write(row, 5, item.quality_score_percent, formats["number"])
+        sheet.write(row, 6, item.status.upper(), formats["good"] if item.status == "known" else formats["warning"])
+
+
+def _write_confidence_register(
+    sheet: Worksheet,
+    case: EngineeringCase,
+    formats: FormatMap,
+) -> None:
+    _setup(sheet, [(0, 0, 22), (1, 1, 30), (2, 4, 18), (5, 5, 22), (6, 9, 55)])
+    _title(sheet, "PREDICTION CONFIDENCE REGISTER", formats, 9)
+    sheet.write_row(3, 0, ["Code", "Prediction", "Raw prediction", "Calibration factor", "Confidence %", "Interval", "Method", "Critical assumptions", "Sensitive variables", "Unknown inputs / validation"], formats["header"])
+    for row, item in enumerate(case.predictions, 4):
+        interval = item.prediction_interval
+        interval_text = "N/A"
+        if interval is not None:
+            if interval.low is not None and interval.high is not None:
+                interval_text = f"{interval.low} to {interval.high} {interval.unit or ''}".strip()
+            else:
+                interval_text = str(interval.central)
+        sheet.write(row, 0, item.code, formats["text"])
+        sheet.write(row, 1, f"{item.prediction} {item.unit or ''}".strip(), formats["text"])
+        sheet.write(row, 2, item.raw_prediction, formats["reference"])
+        sheet.write(row, 3, item.calibration_factor, formats["number"])
+        sheet.write(row, 4, item.confidence_percent, formats["number"])
+        sheet.write(row, 5, interval_text, formats["text"])
+        sheet.write(row, 6, item.method, formats["text"])
+        sheet.write(row, 7, "\n".join(item.critical_assumptions), formats["text"])
+        sheet.write(row, 8, "\n".join(item.sensitive_variables), formats["text"])
+        sheet.write(row, 9, "\n".join([*item.unknown_inputs, *item.required_validation]), formats["text"])
+
+
+def _write_risk_register(
+    sheet: Worksheet,
+    case: EngineeringCase,
+    formats: FormatMap,
+) -> None:
+    _setup(sheet, [(0, 0, 18), (1, 1, 18), (2, 4, 50), (5, 8, 12), (9, 10, 50)])
+    _title(sheet, "ENGINEERING RISK REGISTER", formats, 10)
+    sheet.write_row(3, 0, ["Risk ID", "Discipline", "Failure mode", "Cause", "Consequence", "Severity", "Likelihood", "Detectability", "RPN", "Mitigation", "Rollback trigger"], formats["header"])
+    for row, item in enumerate(case.risk_register, 4):
+        sheet.write_row(
+            row,
+            0,
+            [
+                item.failure_mode_id,
+                item.discipline,
+                item.failure_mode,
+                item.cause,
+                item.consequence,
+                item.severity,
+                item.likelihood,
+                item.detectability,
+                item.risk_priority_number,
+                item.mitigation,
+                item.rollback_trigger,
+            ],
+            formats["text"],
+        )
+        sheet.write(row, 8, item.risk_priority_number, formats["warning"] if item.risk_priority_number >= 60 else formats["number"])
+
+
+def _write_review_committee(
+    sheet: Worksheet,
+    case: EngineeringCase,
+    formats: FormatMap,
+) -> None:
+    _setup(sheet, [(0, 0, 20), (1, 2, 14), (3, 4, 65), (5, 5, 34), (6, 6, 55)])
+    _title(sheet, "MULTIDISCIPLINARY ENGINEERING REVIEW", formats, 6)
+    sheet.write_row(3, 0, ["Discipline", "Mandatory", "Status", "Findings", "Blocking issues", "Approval owner", "Evidence reviewed"], formats["header"])
+    for row, item in enumerate(case.review_committee, 4):
+        sheet.write(row, 0, item.discipline, formats["label"])
+        sheet.write(row, 1, "YES" if item.mandatory else "NO", formats["text"])
+        sheet.write(row, 2, item.status.upper(), formats["good"] if item.status == "pass" else formats["warning"])
+        sheet.write(row, 3, "\n".join(item.findings), formats["text"])
+        sheet.write(row, 4, "\n".join(item.blocking_issues), formats["warning"] if item.blocking_issues else formats["text"])
+        sheet.write(row, 5, item.approval_required_from, formats["text"])
+        sheet.write(row, 6, "\n".join(item.evidence_reviewed), formats["text"])
+
+
+def _write_scenario_rationale(
+    sheet: Worksheet,
+    case: EngineeringCase,
+    formats: FormatMap,
+) -> None:
+    _setup(sheet, [(0, 0, 8), (1, 1, 28), (2, 4, 52), (5, 6, 18), (7, 9, 52)])
+    _title(sheet, "SCENARIO ENGINEERING RATIONALE", formats, 9)
+    sheet.write_row(3, 0, ["Rank", "Scenario", "Why it exists", "Expected benefit", "Expected downside", "Probability %", "Risk", "Business impact", "Engineering impact", "Required validation"], formats["header"])
+    for row, item in enumerate(case.scenario_assessments, 4):
+        sheet.write(row, 0, item.rank, formats["integer"])
+        sheet.write(row, 1, item.name, formats["label"])
+        sheet.write(row, 2, item.why_it_exists, formats["text"])
+        sheet.write(row, 3, "\n".join(item.expected_benefit), formats["text"])
+        sheet.write(row, 4, "\n".join(item.expected_downside), formats["text"])
+        sheet.write(row, 5, item.probability_of_success_percent, formats["number"])
+        sheet.write(row, 6, item.risk_level.upper(), formats["warning"] if item.risk_level in {"high", "critical"} else formats["text"])
+        sheet.write(row, 7, item.business_impact, formats["text"])
+        sheet.write(row, 8, item.engineering_impact, formats["text"])
+        sheet.write(row, 9, "\n".join(item.required_validation), formats["text"])
+
+
+def _write_validation_matrix(
+    sheet: Worksheet,
+    case: EngineeringCase,
+    formats: FormatMap,
+) -> None:
+    _setup(sheet, [(0, 0, 18), (1, 3, 50), (4, 4, 42), (5, 7, 24), (8, 8, 18), (9, 9, 55)])
+    _title(sheet, "VALIDATION MATRIX", formats, 9)
+    sheet.write_row(3, 0, ["Validation ID", "Category", "Measurement", "Purpose", "Acceptance tolerance", "Frequency / sample", "Owner", "Availability", "Blocking", "Evidence generated"], formats["header"])
+    for row, item in enumerate(case.validation_plan, 4):
+        sheet.write_row(
+            row,
+            0,
+            [
+                item.validation_id,
+                item.category,
+                item.measurement,
+                item.purpose,
+                item.acceptable_tolerance,
+                item.frequency_or_sample,
+                item.owner,
+                item.availability,
+                "YES" if item.blocking else "NO",
+                item.evidence_generated,
+            ],
+            formats["text"],
+        )
+        sheet.write(row, 7, item.availability.upper(), formats["good"] if item.availability == "available" else formats["warning"])
+        sheet.write(row, 8, "YES" if item.blocking else "NO", formats["warning"] if item.blocking else formats["text"])
+
+
+def _write_operator_checklist(
+    sheet: Worksheet,
+    case: EngineeringCase,
+    formats: FormatMap,
+) -> None:
+    _setup(sheet, [(0, 0, 8), (1, 1, 82), (2, 2, 24)])
+    _title(sheet, "SHIFT / OPERATOR CHECKLIST", formats, 2)
+    sheet.write_row(3, 0, ["Done", "Checklist item", "Responsible / time"], formats["header"])
+    items = [
+        "Confirm approved case ID, revision, recipe and rollback recipe.",
+        "Confirm all interlocks, alarms and environmental monitoring are operational.",
+        "Confirm feeder calibration, material identity and silo route.",
+        "Confirm laboratory sampling resources and product-hold instruction.",
+        *case.pilot_plan.monitoring_plan,
+        *case.pilot_plan.go_no_go_criteria,
+    ]
+    for row, item in enumerate(items, 4):
+        sheet.write(row, 0, "☐", formats["input"])
+        sheet.write(row, 1, item, formats["text"])
+        sheet.write(row, 2, "", formats["input"])
+
+
+def _write_rollback(
+    sheet: Worksheet,
+    case: EngineeringCase,
+    formats: FormatMap,
+) -> None:
+    _setup(sheet, [(0, 0, 8), (1, 2, 70)])
+    _title(sheet, "ROLLBACK PROCEDURE", formats, 2)
+    sheet.merge_range(3, 0, 3, 2, "The trial must be stopped or held when any approved rollback trigger occurs.", formats["warning"])
+    sheet.write_row(5, 0, ["Step", "Rollback action", "Record / approval"], formats["header"])
+    actions = [
+        "Stop increasing the changed parameter or production rate.",
+        "Return recipe, feed, fuel and machine controls to the last approved baseline.",
+        "Segregate and hold affected material; preserve representative samples.",
+        "Record time, readings, alarms, operator actions and equipment state.",
+        "Obtain Process, Quality and Plant Head disposition before restart.",
+    ]
+    for row, item in enumerate(actions, 6):
+        sheet.write(row, 0, row - 5, formats["integer"])
+        sheet.write(row, 1, item, formats["text"])
+        sheet.write(row, 2, "", formats["input"])
+    start = 13
+    sheet.merge_range(start, 0, start, 2, "CASE-SPECIFIC ROLLBACK TRIGGERS", formats["section"])
+    for row, item in enumerate(case.risk_register, start + 1):
+        sheet.write(row, 0, item.discipline, formats["label"])
+        sheet.write(row, 1, item.rollback_trigger, formats["warning"])
+        sheet.write(row, 2, item.mitigation, formats["text"])
+
+
+def _write_lessons_learned(
+    sheet: Worksheet,
+    case: EngineeringCase,
+    validations: list[EngineeringValidationRecord],
+    formats: FormatMap,
+) -> None:
+    _setup(sheet, [(0, 0, 20), (1, 1, 26), (2, 4, 48), (5, 7, 20)])
+    _title(sheet, "LESSONS LEARNED / CONTROLLED MODEL IMPROVEMENT", formats, 7)
+    sheet.write_row(3, 0, ["Validation ID", "Accepted for calibration", "Rejection reason", "Root cause", "Corrective action / comments", "MAPE %", "Confidence before", "Confidence after"], formats["header"])
+    for row, item in enumerate(validations, 4):
+        sheet.write(row, 0, item.validation_id, formats["text"])
+        sheet.write(row, 1, "YES" if item.accepted_for_calibration else "NO", formats["good"] if item.accepted_for_calibration else formats["warning"])
+        sheet.write(row, 2, item.calibration_rejection_reason or "", formats["text"])
+        sheet.write(row, 3, item.root_cause or "", formats["text"])
+        sheet.write(row, 4, item.comments or "", formats["text"])
+        sheet.write(row, 5, item.mean_absolute_percent_error, formats["number"])
+        sheet.write(row, 6, item.confidence_before_percent, formats["number"])
+        sheet.write(row, 7, item.confidence_after_percent, formats["number"])
+    if not validations:
+        sheet.merge_range(4, 0, 6, 7, "No completed validation record exists. The model must not learn from unvalidated or unsigned observations.", formats["warning"])
+
+
+def _write_version_history(
+    sheet: Worksheet,
+    case: EngineeringCase,
+    formats: FormatMap,
+) -> None:
+    trust = case.trust_assessment
+    gate = case.decision_gate
+    if trust is None or gate is None:
+        raise ValueError(
+            "Version history requires a trust assessment and decision gate"
+        )
+
+    _setup(sheet, [(0, 0, 24), (1, 1, 34), (2, 2, 28), (3, 3, 70)])
+    _title(sheet, "VERSION HISTORY AND MODEL MANIFEST", formats, 3)
+    sheet.write_row(3, 0, ["Field", "Value", "Owner", "Traceability note"], formats["header"])
+    rows = [
+        ("Case ID", case.case_id, case.project.engineer, "Immutable engineering decision identifier"),
+        ("Revision", case.project.revision, case.project.engineer, "Controlled project revision"),
+        ("Calculation version", case.calculation_version, "BRIXTA", "Equation and decision-engine version"),
+        ("Catalog version", trust.catalog_version, "BRIXTA", "Configurable product, evidence and governance catalog"),
+        ("Source study", case.study_id, "BRIXTA", "Scenario-generation source"),
+        ("Source scenario", case.candidate_id, "BRIXTA", "Selected candidate identifier"),
+        ("Baseline blend", case.baseline_blend_id, "Plant / BRIXTA", "Versioned formulation basis"),
+        ("Route", case.route_id, "Plant / BRIXTA", "Versioned process route"),
+        ("Created at", case.created_at.isoformat(), case.project.engineer, "Case generation timestamp"),
+        ("Decision gate", gate.decision, "Engineering review committee", gate.reason),
+    ]
+    for row, item in enumerate(rows, 4):
+        sheet.write_row(row, 0, item, formats["text"])

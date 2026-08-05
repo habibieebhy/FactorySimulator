@@ -4,10 +4,23 @@ import json
 import sqlite3
 from datetime import datetime
 from statistics import median
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from .engineering_catalog import load_engineering_catalog
+from .engineering_trust import (
+    DecisionGate,
+    DisciplineReview,
+    EvidenceRecord,
+    FailureMode,
+    PredictionInterval,
+    ScenarioAssessment,
+    TrustAssessment,
+    UnknownInput,
+    ValidationRequirement,
+    EngineeringTrustService,
+)
 from .models import (
     Blend,
     Machine,
@@ -22,17 +35,24 @@ from .storage import Repository
 
 ConfidenceBand = Literal["low", "medium", "high"]
 RiskRating = Literal["low", "medium", "high", "critical"]
+ProtocolRisk = Annotated[
+    str,
+    Field(pattern=r"^(low|medium|high|critical)$"),
+]
 DecisionStatus = Literal["draft", "proceed", "hold", "reject"]
 
 
 class EngineeringProject(BaseModel):
-    project_name: str = "PPC-to-LC3 Engineering Decision"
+    project_name: str = "Engineering Decision"
     plant_name: str = "Reference plant"
     engineer: str = "BRIXTA Engineering"
-    product_target: str = "LC3"
+    product_target: str = "Configured cement product"
+    product_definition_id: str | None = None
     revision: str = "R0"
+    quality_standard_ids: list[str] = Field(default_factory=list)
     bis_constraints: list[str] = Field(default_factory=list)
     customer_constraints: list[str] = Field(default_factory=list)
+    validation_resources: list[str] = Field(default_factory=list)
     pilot_quantity_t: float = Field(default=500.0, gt=0)
     pilot_rate_fraction: float = Field(default=0.60, gt=0, le=1)
     monitoring_hours: float = Field(default=72.0, gt=0)
@@ -50,13 +70,21 @@ class EngineeringPrediction(BaseModel):
     category: str
     label: str
     prediction: float | str | None = None
+    raw_prediction: float | str | None = None
+    calibration_factor: float = Field(default=1.0, gt=0)
     unit: str | None = None
     confidence_percent: float = Field(ge=0, le=100)
     confidence_band: ConfidenceBand
+    prediction_interval: PredictionInterval | None = None
     reason: str
+    method: str = "Deterministic engineering screening"
+    critical_assumptions: list[str] = Field(default_factory=list)
+    sensitive_variables: list[str] = Field(default_factory=list)
+    unknown_inputs: list[str] = Field(default_factory=list)
     required_validation: list[str] = Field(default_factory=list)
     source_basis: list[str] = Field(default_factory=list)
-    risk: RiskRating = "medium"
+    evidence_ids: list[str] = Field(default_factory=list)
+    risk: ProtocolRisk = "medium"
 
 
 class EngineeringAction(BaseModel):
@@ -73,12 +101,16 @@ class EngineeringRecommendation(BaseModel):
     title: str
     discipline: str
     priority: Literal["P1", "P2", "P3"] = "P2"
+    recommendation_authority: Literal["advisory_only", "pilot_candidate", "production_authorised"] = "advisory_only"
     actions: list[EngineeringAction] = Field(default_factory=list)
     expected_results: list[EngineeringPrediction] = Field(default_factory=list)
     confidence_percent: float = Field(ge=0, le=100)
     reasons: list[str] = Field(default_factory=list)
     required_validation: list[str] = Field(default_factory=list)
-    risk: RiskRating = "medium"
+    potential_failure_modes: list[str] = Field(default_factory=list)
+    rollback_criteria: list[str] = Field(default_factory=list)
+    approval_requirements: list[str] = Field(default_factory=list)
+    risk: ProtocolRisk = "medium"
     proceed_condition: str
 
 
@@ -107,7 +139,7 @@ class PilotBatchPlan(BaseModel):
 class EngineeringCase(BaseModel):
     case_id: str
     created_at: datetime
-    calculation_version: str = "0.9.0"
+    calculation_version: str = "1.0.0"
     status: DecisionStatus = "draft"
     project: EngineeringProject
     study_id: str
@@ -127,6 +159,14 @@ class EngineeringCase(BaseModel):
     calculation_trace: list[dict[str, str | float | None]] = Field(default_factory=list)
     calibration_profile: dict[str, float] = Field(default_factory=dict)
     calibration_sample_count: int = 0
+    trust_assessment: TrustAssessment | None = None
+    decision_gate: DecisionGate | None = None
+    evidence_register: list[EvidenceRecord] = Field(default_factory=list)
+    risk_register: list[FailureMode] = Field(default_factory=list)
+    review_committee: list[DisciplineReview] = Field(default_factory=list)
+    validation_plan: list[ValidationRequirement] = Field(default_factory=list)
+    scenario_assessments: list[ScenarioAssessment] = Field(default_factory=list)
+    unknown_inputs: list[UnknownInput] = Field(default_factory=list)
 
 
 class EngineeringValidationCreate(BaseModel):
@@ -149,6 +189,8 @@ class EngineeringValidationCreate(BaseModel):
     engineer_signoff: str | None = None
     quality_head_signoff: str | None = None
     plant_head_signoff: str | None = None
+    use_for_calibration: bool = False
+    evidence_references: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def has_actual_measurement(self) -> "EngineeringValidationCreate":
@@ -186,6 +228,8 @@ class EngineeringValidationRecord(EngineeringValidationCreate):
     confidence_after_percent: float
     calibration_profile: dict[str, float] = Field(default_factory=dict)
     calibration_sample_count: int = 0
+    accepted_for_calibration: bool = False
+    calibration_rejection_reason: str | None = None
 
 
 class EngineeringLearningResult(BaseModel):
@@ -197,6 +241,8 @@ class EngineeringLearningResult(BaseModel):
     confidence_after_percent: float
     calibration_profile: dict[str, float] = Field(default_factory=dict)
     calibration_sample_count: int = 0
+    accepted_for_calibration: bool = False
+    calibration_rejection_reason: str | None = None
     learning_summary: str
 
 
@@ -287,6 +333,8 @@ class EngineeringDecisionService:
     def __init__(self, repository: Repository) -> None:
         self.repository = repository
         self.store = EngineeringStore(repository)
+        self.catalog = load_engineering_catalog()
+        self.trust = EngineeringTrustService(repository, self.catalog)
 
     def create_case(self, payload: EngineeringCaseCreate) -> EngineeringCase:
         study = self.repository.get("retrofit_studies", payload.study_id)
@@ -309,21 +357,57 @@ class EngineeringDecisionService:
         profile, samples = self._calibration_profile(
             payload.project.plant_name, payload.project.product_target
         )
-        confidence = self._confidence(study, candidate, samples)
-        band = self._confidence_band(confidence)
-        risk = self._risk(study, candidate, confidence)
-        predictions = self._predictions(study, candidate, confidence, profile)
+        screening_confidence = self._confidence(study, candidate, samples)
+        screening_risk = self._risk(study, candidate, screening_confidence)
+        predictions = self._predictions(
+            study, candidate, screening_confidence, profile
+        )
+        predictions = self._annotate_calibration(predictions, candidate, profile)
         recommendations = self._recommendations(
-            study, candidate, predictions, confidence, risk
+            study, candidate, predictions, screening_confidence, screening_risk
         )
         pilot = self._pilot_plan(payload.project, route, candidate)
         missing_data = self._missing_data(study, candidate)
+        trust = self.trust.assess(
+            study=study,
+            candidate=candidate,
+            product_target=payload.project.product_target,
+            product_definition_id=payload.project.product_definition_id,
+            standard_ids=[
+                *payload.project.quality_standard_ids,
+                *payload.project.bis_constraints,
+            ],
+            validation_resources=payload.project.validation_resources,
+            predictions=predictions,
+            recommendations=recommendations,
+            missing_data=missing_data,
+            calculation_trace_count=len(candidate.calculation_trace),
+            calibration_samples=samples,
+        )
+        predictions = self._enrich_predictions(predictions, trust)
+        recommendations = self._govern_recommendations(recommendations, trust)
+        confidence = trust.overall_confidence_percent
+        band = trust.confidence_band
+        risk = self._case_risk_from_trust(trust)
+        status: DecisionStatus = (
+            "proceed"
+            if trust.decision_gate.pilot_authorised
+            else "reject"
+            if trust.decision_gate.decision == "reject"
+            else "hold"
+        )
         executive_summary = self._executive_summary(
-            payload.project, candidate, predictions, confidence, risk
+            payload.project,
+            candidate,
+            predictions,
+            confidence,
+            risk,
+            trust.decision_gate,
         )
         case = EngineeringCase(
             case_id=new_id("engcase"),
             created_at=now(),
+            status=status,
             project=payload.project,
             study_id=study.study_id,
             candidate_id=candidate.candidate_id,
@@ -352,6 +436,14 @@ class EngineeringDecisionService:
             ],
             calibration_profile=profile,
             calibration_sample_count=samples,
+            trust_assessment=trust,
+            decision_gate=trust.decision_gate,
+            evidence_register=trust.evidence_register,
+            risk_register=trust.risk_register,
+            review_committee=trust.review_committee,
+            validation_plan=trust.validation_plan,
+            scenario_assessments=trust.scenario_assessments,
+            unknown_inputs=trust.unknown_inputs,
         )
         return self.store.save_case(case)
 
@@ -390,7 +482,12 @@ class EngineeringDecisionService:
                 )
             )
         mape = sum(percent_errors) / len(percent_errors) if percent_errors else None
-        confidence_after = self._confidence_after(case.confidence_percent, mape)
+        accepted, rejection_reason = self._calibration_acceptance(payload)
+        confidence_after = (
+            self._confidence_after(case.confidence_percent, mape)
+            if accepted
+            else case.confidence_percent
+        )
         validation_id = new_id("engval")
         provisional = EngineeringValidationRecord(
             **payload.model_dump(),
@@ -401,6 +498,8 @@ class EngineeringDecisionService:
             mean_absolute_percent_error=mape,
             confidence_before_percent=case.confidence_percent,
             confidence_after_percent=confidence_after,
+            accepted_for_calibration=accepted,
+            calibration_rejection_reason=rejection_reason,
         )
         self.store.save_validation(provisional)
         profile, samples = self._calibration_profile(
@@ -422,7 +521,15 @@ class EngineeringDecisionService:
             confidence_after_percent=confidence_after,
             calibration_profile=profile,
             calibration_sample_count=samples,
-            learning_summary=self._learning_summary(mape, profile, samples),
+            accepted_for_calibration=accepted,
+            calibration_rejection_reason=rejection_reason,
+            learning_summary=self._learning_summary(
+                mape,
+                profile,
+                samples,
+                accepted=accepted,
+                rejection_reason=rejection_reason,
+            ),
         )
 
     def latest_learning(self, case_id: str) -> EngineeringLearningResult | None:
@@ -442,12 +549,143 @@ class EngineeringDecisionService:
             confidence_after_percent=item.confidence_after_percent,
             calibration_profile=item.calibration_profile,
             calibration_sample_count=item.calibration_sample_count,
+            accepted_for_calibration=item.accepted_for_calibration,
+            calibration_rejection_reason=item.calibration_rejection_reason,
             learning_summary=self._learning_summary(
                 item.mean_absolute_percent_error,
                 item.calibration_profile,
                 item.calibration_sample_count,
+                accepted=item.accepted_for_calibration,
+                rejection_reason=item.calibration_rejection_reason,
             ),
         )
+
+    @staticmethod
+    def _annotate_calibration(
+        predictions: list[EngineeringPrediction],
+        candidate: RetrofitCandidate,
+        profile: dict[str, float],
+    ) -> list[EngineeringPrediction]:
+        raw_values: dict[str, float | str | None] = {
+            "output_tph": candidate.predicted_output_tph,
+            "electricity_kwh_t": candidate.electricity_kwh_t,
+            "thermal_kcal_kg": candidate.thermal_kcal_kg,
+            "variable_cost_inr_t": candidate.total_variable_cost_inr_t,
+            "material_co2_kg_t": candidate.material_co2_kg_t,
+            "clinker_factor_percent": candidate.clinker_factor_percent,
+        }
+        output: list[EngineeringPrediction] = []
+        for item in predictions:
+            factor = profile.get(item.code, 1.0)
+            output.append(
+                item.model_copy(
+                    update={
+                        "raw_prediction": raw_values.get(item.code, item.prediction),
+                        "calibration_factor": factor,
+                        "source_basis": [
+                            *item.source_basis,
+                            f"Explicit calibration factor applied: {factor:.4f}",
+                        ],
+                    }
+                )
+            )
+        return output
+
+    @staticmethod
+    def _calibration_acceptance(
+        payload: EngineeringValidationCreate,
+    ) -> tuple[bool, str | None]:
+        if not payload.use_for_calibration:
+            return False, "Validation was recorded for audit only; use_for_calibration was not approved."
+        if payload.decision != "proceed":
+            return False, "Only a formally accepted PROCEED validation may recalibrate future models."
+        missing_signoffs = [
+            role
+            for role, value in (
+                ("Engineer", payload.engineer_signoff),
+                ("Quality Head", payload.quality_head_signoff),
+                ("Plant Head", payload.plant_head_signoff),
+            )
+            if not value or not value.strip()
+        ]
+        if missing_signoffs:
+            return False, "Calibration rejected because required sign-offs are missing: " + ", ".join(missing_signoffs)
+        if not payload.evidence_references:
+            return False, "Calibration rejected because no traceable evidence reference was attached."
+        return True, None
+
+    def _enrich_predictions(
+        self,
+        predictions: list[EngineeringPrediction],
+        trust: TrustAssessment,
+    ) -> list[EngineeringPrediction]:
+        critical_assumptions = [item.statement for item in trust.critical_assumptions[:8]]
+        sensitive_variables = [item.variable for item in trust.sensitive_variables[:8]]
+        unknown_inputs = [item.item for item in trust.unknown_inputs[:12]]
+        evidence_ids = [item.evidence_id for item in trust.evidence_register[:20]]
+        output: list[EngineeringPrediction] = []
+        for item in predictions:
+            earned = min(item.confidence_percent, trust.overall_confidence_percent + 5.0)
+            output.append(
+                item.model_copy(
+                    update={
+                        "confidence_percent": round(earned, 1),
+                        "confidence_band": self._confidence_band(earned),
+                        "prediction_interval": self.trust.prediction_interval(
+                            item.code,
+                            item.prediction,
+                            earned,
+                            item.unit,
+                        ),
+                        "critical_assumptions": critical_assumptions,
+                        "sensitive_variables": sensitive_variables,
+                        "unknown_inputs": unknown_inputs,
+                        "evidence_ids": evidence_ids,
+                    }
+                )
+            )
+        return output
+
+    @staticmethod
+    def _govern_recommendations(
+        recommendations: list[EngineeringRecommendation],
+        trust: TrustAssessment,
+    ) -> list[EngineeringRecommendation]:
+        authority: Literal["advisory_only", "pilot_candidate", "production_authorised"] = (
+            "pilot_candidate" if trust.decision_gate.pilot_authorised else "advisory_only"
+        )
+        failure_modes = [item.failure_mode for item in trust.risk_register[:8]]
+        rollback = [item.rollback_trigger for item in trust.risk_register[:8]]
+        output: list[EngineeringRecommendation] = []
+        for item in recommendations:
+            output.append(
+                item.model_copy(
+                    update={
+                        "recommendation_authority": authority,
+                        "potential_failure_modes": failure_modes,
+                        "rollback_criteria": rollback,
+                        "approval_requirements": trust.decision_gate.approval_requirements,
+                        "proceed_condition": (
+                            item.proceed_condition
+                            + " Decision gate: "
+                            + trust.decision_gate.reason
+                        ),
+                    }
+                )
+            )
+        return output
+
+    @staticmethod
+    def _case_risk_from_trust(trust: TrustAssessment) -> RiskRating:
+        if trust.decision_gate.decision == "reject":
+            return "critical"
+        if any(item.risk_priority_number >= 80 for item in trust.risk_register):
+            return "critical"
+        if any(item.risk_priority_number >= 60 for item in trust.risk_register):
+            return "high"
+        if trust.decision_gate.blocking_conditions:
+            return "medium"
+        return "low"
 
     def _calibration_profile(
         self, plant_name: str, product_target: str
@@ -455,6 +693,8 @@ class EngineeringDecisionService:
         factors: dict[str, list[float]] = {key: [] for key in self.METRIC_FIELDS}
         samples = 0
         for validation in self.store.list_validations():
+            if not validation.accepted_for_calibration:
+                continue
             case = self.store.get_case(validation.case_id)
             if case is None:
                 continue
@@ -1002,17 +1242,19 @@ class EngineeringDecisionService:
         predictions: list[EngineeringPrediction],
         confidence: float,
         risk: RiskRating,
+        gate: DecisionGate,
     ) -> str:
         values = {item.code: item for item in predictions}
         output = values["output_tph"].prediction
         cost = values["variable_cost_inr_t"].prediction
         co2 = values["material_co2_kg_t"].prediction
         return (
-            f"{project.project_name} screens candidate {candidate.name} for {project.plant_name}. "
-            f"The reference model predicts {output} t/h, variable cost {cost} INR/t and material CO2 {co2} kg/t. "
-            f"Overall confidence is {confidence:.1f}% and risk is {risk.upper()}. "
-            "The recommendation is not a production authorisation: the pilot plan, missing-data register, "
-            "laboratory validation and plant sign-offs must be completed before scale-up."
+            f"{project.project_name} reviews candidate {candidate.name} for {project.plant_name}. "
+            f"The configured engineering model predicts {output} t/h, variable cost {cost} INR/t and material CO2 {co2} kg/t. "
+            f"Earned confidence is {confidence:.1f}% and implementation risk is {risk.upper()}. "
+            f"Decision gate: {gate.decision.upper()} — {gate.reason} "
+            "No production change is authorised by the calculation alone; evidence, validation, pilot control, "
+            "rollback readiness and required sign-offs remain governing conditions."
         )
 
     @staticmethod
@@ -1033,13 +1275,23 @@ class EngineeringDecisionService:
 
     @staticmethod
     def _learning_summary(
-        mape: float | None, profile: dict[str, float], samples: int
+        mape: float | None,
+        profile: dict[str, float],
+        samples: int,
+        *,
+        accepted: bool,
+        rejection_reason: str | None,
     ) -> str:
         if mape is None:
             return "Actual results were recorded, but no comparable predicted metric was supplied."
+        if not accepted:
+            return (
+                f"Pilot mean absolute prediction error is {mape:.2f}%. "
+                f"The record remains in the audit trail but did not recalibrate the model. {rejection_reason or ''}".strip()
+            )
         factors = ", ".join(f"{key}={value:.3f}" for key, value in profile.items())
         return (
             f"Pilot mean absolute prediction error is {mape:.2f}%. "
-            f"The plant/product calibration profile now contains {samples} validation record(s): {factors}. "
-            "Future engineering cases for the same plant and product apply the median correction factor while retaining the raw prediction in the audit trail."
+            f"The approved plant/product calibration profile contains {samples} accepted validation record(s): {factors}. "
+            "Future cases explicitly disclose the applied median correction factor and retain both raw and calibrated predictions."
         )

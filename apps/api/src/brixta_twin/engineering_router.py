@@ -3,6 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
+from .engineering_catalog import EngineeringCatalog, load_engineering_catalog
+
 from .engineering_decision import (
     EngineeringCase,
     EngineeringCaseCreate,
@@ -10,6 +12,7 @@ from .engineering_decision import (
     EngineeringLearningResult,
     EngineeringValidationCreate,
 )
+from .engineering_package import compile_engineering_package
 from .engineering_workbook import compile_engineering_workbook
 from .models import RetrofitStudyResult
 from .storage import Repository
@@ -18,6 +21,10 @@ from .storage import Repository
 def build_engineering_router(repository: Repository) -> APIRouter:
     router = APIRouter(prefix="/api/engineering", tags=["engineering-decision"])
     service = EngineeringDecisionService(repository)
+
+    @router.get("/catalog", response_model=EngineeringCatalog)
+    def engineering_catalog() -> EngineeringCatalog:
+        return load_engineering_catalog()
 
     @router.post("/cases", response_model=EngineeringCase)
     def create_engineering_case(payload: EngineeringCaseCreate) -> EngineeringCase:
@@ -36,6 +43,45 @@ def build_engineering_router(repository: Repository) -> APIRouter:
         if case is None:
             raise HTTPException(404, "Unknown engineering case")
         return case
+
+    @router.get("/cases/{case_id}/trust")
+    def engineering_case_trust(case_id: str):
+        case = service.store.get_case(case_id)
+        if case is None:
+            raise HTTPException(404, "Unknown engineering case")
+        if case.trust_assessment is None:
+            raise HTTPException(409, "Legacy engineering case has no trust assessment; create a new revision under calculation version 1.0.0")
+        return case.trust_assessment
+
+    @router.get("/cases/{case_id}/package.zip")
+    def export_engineering_package(case_id: str) -> Response:
+        case = service.store.get_case(case_id)
+        if case is None:
+            raise HTTPException(404, "Unknown engineering case")
+        if case.trust_assessment is None or case.decision_gate is None:
+            raise HTTPException(409, "Legacy engineering case cannot be packaged; create a new revision under calculation version 1.0.0")
+        study = repository.get("retrofit_studies", case.study_id)
+        if not isinstance(study, RetrofitStudyResult):
+            raise HTTPException(404, "Engineering case source study is unavailable")
+        candidate = next(
+            (item for item in study.candidates if item.candidate_id == case.candidate_id),
+            None,
+        )
+        if candidate is None:
+            raise HTTPException(404, "Engineering case scenario is unavailable")
+        content = compile_engineering_package(
+            repository,
+            case,
+            study,
+            candidate,
+            service.store.list_validations(case_id),
+        )
+        filename = f"BRIXTA_Digital_Engineering_Package_{case.case_id}_{case.project.revision}.zip"
+        return Response(
+            content=content,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @router.get("/cases/{case_id}/export.xlsx")
     def export_engineering_case(case_id: str) -> Response:

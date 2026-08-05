@@ -1,0 +1,114 @@
+{
+  "catalog_version": "1.0.0",
+  "product_definitions": [
+    {
+      "product_id": "opc",
+      "name": "Ordinary Portland Cement",
+      "family": "Portland cement",
+      "description": "Configurable Portland-cement product definition. Compliance limits are supplied by linked quality-standard records, not embedded in solver code.",
+      "required_material_roles": ["clinker", "set_regulator"],
+      "optional_material_roles": ["cement_addition", "process_additive"],
+      "required_process_capabilities": ["clinker_production", "cement_grinding", "cement_storage", "packing_dispatch"],
+      "required_validation": ["component_xrf", "clinker_free_lime", "cement_fineness", "setting_time", "soundness", "compressive_strength"],
+      "default_quality_standard_ids": []
+    },
+    {
+      "product_id": "ppc",
+      "name": "Portland Pozzolana Cement",
+      "family": "Blended Portland cement",
+      "description": "Configurable pozzolanic cement definition.",
+      "required_material_roles": ["clinker", "set_regulator", "cement_addition"],
+      "optional_material_roles": ["process_additive"],
+      "required_process_capabilities": ["clinker_production", "pozzolan_handling", "cement_grinding", "cement_storage", "packing_dispatch"],
+      "required_validation": ["component_xrf", "pozzolan_reactivity", "cement_fineness", "setting_time", "soundness", "compressive_strength"],
+      "default_quality_standard_ids": []
+    },
+    {
+      "product_id": "psc",
+      "name": "Portland Slag Cement",
+      "family": "Blended Portland cement",
+      "description": "Configurable slag-cement definition.",
+      "required_material_roles": ["clinker", "set_regulator", "cement_addition"],
+      "optional_material_roles": ["process_additive"],
+      "required_process_capabilities": ["clinker_production", "slag_handling", "slag_drying_or_grinding", "cement_grinding", "cement_storage", "packing_dispatch"],
+      "required_validation": ["component_xrf", "slag_glass_content_or_reactivity", "cement_fineness", "setting_time", "soundness", "compressive_strength"],
+      "default_quality_standard_ids": []
+    },
+    {
+      "product_id": "lc3",
+      "name": "Limestone Calcined Clay Cement",
+      "family": "Calcined-clay blended cement",
+      "description": "Configurable limestone-calcined-clay cement definition.",
+      "required_material_roles": ["clinker", "set_regulator", "cement_addition"],
+      "optional_material_roles": ["process_additive"],
+      "required_process_capabilities": ["clinker_production", "calcined_clay_supply", "limestone_handling", "controlled_dosing", "cement_grinding", "cement_storage", "packing_dispatch"],
+      "required_validation": ["component_xrf", "clay_xrd", "clay_reactivity", "sulfate_optimisation", "cement_fineness", "setting_time", "soundness", "compressive_strength"],
+      "default_quality_standard_ids": []
+    },
+    {
+      "product_id": "white_cement",
+      "name": "White Cement",
+      "family": "Special Portland cement",
+      "description": "Configurable low-colour clinker and cement definition.",
+      "required_material_roles": ["raw_kiln_feed", "corrective", "set_regulator"],
+      "optional_material_roles": ["process_additive"],
+      "required_process_capabilities": ["low_contamination_raw_preparation", "white_clinker_production", "controlled_cooling", "white_cement_grinding", "packing_dispatch"],
+      "required_validation": ["component_xrf", "trace_elements", "whiteness", "clinker_free_lime", "cement_fineness", "setting_time", "soundness", "compressive_strength"],
+      "default_quality_standard_ids": []
+    },
+    {
+      "product_id": "csa_cement",
+      "name": "Calcium Sulfoaluminate Cement",
+      "family": "Alternative clinker system",
+      "description": "Configurable calcium-sulfoaluminate product definition.",
+      "required_material_roles": ["raw_kiln_feed", "corrective", "set_regulator"],
+      "optional_material_roles": ["process_additive"],
+      "required_process_capabilities": ["special_raw_meal_proportioning", "controlled_clinkering", "controlled_cooling", "cement_grinding", "packing_dispatch"],
+      "required_validation": ["component_xrf", "clinker_xrd", "sulfate_balance", "setting_time", "dimensional_stability", "compressive_strength"],
+      "default_quality_standard_ids": []
+    },
+    {
+      "product_id": "geopolymer",
+      "name": "Alkali-Activated / Geopolymer Binder",
+      "family": "Non-Portland binder",
+      "description": "Configurable alkali-activated binder definition.",
+      "required_material_roles": ["cement_addition", "process_additive"],
+      "optional_material_roles": ["set_regulator"],
+      "required_process_capabilities": ["precursor_preparation", "activator_handling", "controlled_dosing", "mixing_or_grinding", "safe_storage", "packing_dispatch"],
+      "required_validation": ["precursor_xrf", "precursor_xrd", "activator_composition", "workability", "setting_time", "durability", "compressive_strength", "chemical_handling_safety"],
+      "default_quality_standard_ids": []
+    }
+  ],
+  "discipline_reviews": [
+    {"discipline": "chemistry", "mandatory": true, "questions": ["Are material chemistry and variability adequate for the proposed formulation?", "Are alkali, sulfate, chloride, MgO and LOI risks resolved?"]},
+    {"discipline": "mineralogy", "mandatory": true, "questions": ["Is mineralogical or phase evidence adequate for the claimed reaction and quality behaviour?", "Are screening estimates clearly separated from measured XRD/Rietveld results?"]},
+    {"discipline": "process", "mandatory": true, "questions": ["Does the route conserve mass and contain every required process capability?", "Are bottlenecks, recycles and operating envelopes resolved?"]},
+    {"discipline": "thermal", "mandatory": true, "questions": ["Is the heat balance closed using traceable fuel, gas, moisture and loss data?", "Are proposed thermal changes inside approved operating envelopes?"]},
+    {"discipline": "mechanical", "mandatory": true, "questions": ["Can every machine, feeder, conveyor, silo, fan and separator handle the proposed duty?", "Are availability, turndown and mechanical integrity evidenced?"]},
+    {"discipline": "economics", "mandatory": true, "questions": ["Are material, energy, operating and implementation costs traceable and current?", "Are excluded costs explicitly declared?"]},
+    {"discipline": "quality", "mandatory": true, "questions": ["Are applicable standards and customer requirements explicitly linked?", "Is the laboratory validation plan sufficient to release product?"]},
+    {"discipline": "operations", "mandatory": true, "questions": ["Is the recommendation executable by operators with available instrumentation and staffing?", "Are startup, stabilisation, sampling, hold and rollback instructions defined?"]},
+    {"discipline": "safety", "mandatory": true, "questions": ["Are process-safety, environmental, interlock and rollback constraints satisfied?", "Can the proposed change be validated without unacceptable risk?"]}
+  ],
+  "evidence_classes": [
+    {"evidence_class": "plant_measurement", "base_quality": 1.0},
+    {"evidence_class": "laboratory_result", "base_quality": 0.95},
+    {"evidence_class": "validated_historical", "base_quality": 0.9},
+    {"evidence_class": "vendor_guarantee", "base_quality": 0.85},
+    {"evidence_class": "project_engineering", "base_quality": 0.75},
+    {"evidence_class": "regulatory_or_standard", "base_quality": 0.9},
+    {"evidence_class": "peer_reviewed", "base_quality": 0.75},
+    {"evidence_class": "reference_engineering", "base_quality": 0.55},
+    {"evidence_class": "user_assumption", "base_quality": 0.35},
+    {"evidence_class": "unknown", "base_quality": 0.0}
+  ],
+  "decision_policy": {
+    "minimum_pilot_confidence_percent": 70,
+    "minimum_evidence_coverage_percent": 60,
+    "maximum_critical_unknowns": 0,
+    "maximum_high_risks": 2,
+    "require_validation_plan": true,
+    "require_all_mandatory_reviews": true,
+    "production_change_requires_approved_pilot": true
+  }
+}

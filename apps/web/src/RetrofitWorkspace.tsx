@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { API, req } from "./api";
+import { TrustCenter } from "./TrustCenter";
 import type {
   EngineeringCase,
+  EngineeringCatalog,
   EngineeringLearningResult,
   EngineeringPrediction,
 } from "./engineeringTypes";
@@ -15,15 +17,47 @@ import type {
   Route,
 } from "./types";
 
+export type WorkflowSection =
+  | "materials"
+  | "formulation"
+  | "plant"
+  | "retrofit"
+  | "export";
+
+export type WorkflowTool =
+  | "material-editor"
+  | "blend-editor"
+  | "machine-editor"
+  | "route-editor"
+  | "cost-editor"
+  | "library"
+  | "run-library";
+
+export type RetrofitProgress = {
+  hasStudy: boolean;
+  hasEngineeringCase: boolean;
+  selectedCandidateName: string | null;
+};
+
 type Props = {
+  section: WorkflowSection;
   materials: Material[];
   blends: Blend[];
   routes: Route[];
   costBooks: CostBook[];
+  baselineBlendId: string;
+  routeId: string;
+  costBookId: string;
+  targetOutput: number;
+  onBaselineBlendChange: (blendId: string) => void;
+  onRouteChange: (routeId: string) => void;
+  onCostBookChange: (costBookId: string) => void;
+  onTargetOutputChange: (targetOutput: number) => void;
   onBlendCreated: (blend: Blend) => void;
+  onNavigate: (section: "materials" | "formulation" | "plant" | "retrofit" | "scenarios" | "validation" | "export") => void;
+  onOpenTool: (tool: WorkflowTool) => void;
+  onProgressChange?: (progress: RetrofitProgress) => void;
 };
-
-type Stage = 1 | 2 | 3 | 4 | 5 | 6;
 
 type Actuals = {
   actual_output_tph: string;
@@ -45,23 +79,39 @@ type Actuals = {
   engineer_signoff: string;
   quality_head_signoff: string;
   plant_head_signoff: string;
+  use_for_calibration: boolean;
+  evidence_references: string;
 };
 
-const STAGES: Array<{ id: Stage; label: string; subtitle: string }> = [
-  { id: 1, label: "1 · INPUTS", subtitle: "Materials, route, plant and constraints" },
-  { id: 2, label: "2 · SIMULATION", subtitle: "Pareto candidates, balances and risk" },
-  { id: 3, label: "3 · RECOMMEND", subtitle: "Explainable engineering actions" },
-  { id: 4, label: "4 · WORKBOOK", subtitle: "Auditable plant-calibration package" },
-  { id: 5, label: "5 · PILOT", subtitle: "Controlled production and sampling" },
-  { id: 6, label: "6 · LEARNING", subtitle: "Actuals, error and recalibration" },
-];
+const SECTION_COPY: Record<WorkflowSection, { title: string; subtitle: string }> = {
+  materials: {
+    title: "MATERIALS",
+    subtitle: "Choose traceable plant inputs and identify chemistry, cost and evidence gaps before formulation.",
+  },
+  formulation: {
+    title: "FORMULATION",
+    subtitle: "Define the existing PPC basis, LC3 dosage envelope and optimisation priorities.",
+  },
+  plant: {
+    title: "PLANT",
+    subtitle: "Bind the formulation to the plant route, commercial basis, production target and project constraints.",
+  },
+  retrofit: {
+    title: "ENGINEERING DECISION",
+    subtitle: "Submit scenarios to evidence, uncertainty, multidisciplinary review, risk and validation gates.",
+  },
+  export: {
+    title: "EXPORT & PILOT",
+    subtitle: "Package the decision, pilot plan, validation sheets and learning loop into the engineering workbook.",
+  },
+};
 
 function pretty(value: string): string {
   return value.replaceAll("_", " ").replace(/\b\w/g, (match) => match.toUpperCase());
 }
 
-function formatValue(number: number | null, suffix: string, digits = 1): string {
-  return number === null ? "N/A" : `${number.toFixed(digits)}${suffix}`;
+function formatValue(value: number | null, suffix: string, digits = 1): string {
+  return value === null ? "N/A" : `${value.toFixed(digits)}${suffix}`;
 }
 
 function rolePercent(candidate: RetrofitCandidate, role: string): number {
@@ -80,7 +130,56 @@ function optionalNumber(value: string): number | null {
   return value.trim() === "" ? null : Number(value);
 }
 
-export function RetrofitWorkspace({ materials, blends, routes, costBooks, onBlendCreated }: Props) {
+function selectedName<T extends { [key: string]: unknown }>(
+  items: T[],
+  idField: keyof T,
+  nameField: keyof T,
+  selectedId: string,
+): string {
+  const item = items.find((candidate) => String(candidate[idField]) === selectedId);
+  return item ? String(item[nameField]) : "Not selected";
+}
+
+function WorkflowFooter({
+  previous,
+  next,
+  onNavigate,
+}: {
+  previous?: { label: string; section: Parameters<Props["onNavigate"]>[0] };
+  next?: { label: string; section: Parameters<Props["onNavigate"]>[0]; disabled?: boolean };
+  onNavigate: Props["onNavigate"];
+}) {
+  return (
+    <div className="workflow-footer">
+      <div>
+        {previous && <button type="button" onClick={() => onNavigate(previous.section)}>← {previous.label}</button>}
+      </div>
+      <div>
+        {next && <button className="run" type="button" disabled={next.disabled} onClick={() => onNavigate(next.section)}>{next.label} →</button>}
+      </div>
+    </div>
+  );
+}
+
+export function RetrofitWorkspace({
+  section,
+  materials,
+  blends,
+  routes,
+  costBooks,
+  baselineBlendId,
+  routeId,
+  costBookId,
+  targetOutput,
+  onBaselineBlendChange,
+  onRouteChange,
+  onCostBookChange,
+  onTargetOutputChange,
+  onBlendCreated,
+  onNavigate,
+  onOpenTool,
+  onProgressChange,
+}: Props) {
   const ppcBlends = useMemo(
     () => blends
       .filter((item) => item.blend_class === "finished_cement")
@@ -88,11 +187,6 @@ export function RetrofitWorkspace({ materials, blends, routes, costBooks, onBlen
     [blends],
   );
 
-  const [stage, setStage] = useState<Stage>(1);
-  const [baselineBlendId, setBaselineBlendId] = useState("");
-  const [routeId, setRouteId] = useState("");
-  const [costBookId, setCostBookId] = useState("");
-  const [targetOutput, setTargetOutput] = useState(100);
   const [supplyMode, setSupplyMode] = useState<"purchased_calcined_clay" | "onsite_calcination">("purchased_calcined_clay");
   const [calcinedClayId, setCalcinedClayId] = useState("");
   const [limestoneId, setLimestoneId] = useState("");
@@ -117,11 +211,15 @@ export function RetrofitWorkspace({ materials, blends, routes, costBooks, onBlen
   const [complexityWeight, setComplexityWeight] = useState(0.8);
   const [clinkerFactorWeight, setClinkerFactorWeight] = useState(0.6);
 
-  const [projectName, setProjectName] = useState("PPC-to-LC3 Engineering Decision");
+  const [catalog, setCatalog] = useState<EngineeringCatalog | null>(null);
+  const [projectName, setProjectName] = useState("Engineering Decision");
   const [plantName, setPlantName] = useState("Reference plant");
   const [engineer, setEngineer] = useState("BRIXTA Engineering");
+  const [productDefinitionId, setProductDefinitionId] = useState("lc3");
   const [revision, setRevision] = useState("R0");
+  const [qualityStandardIds, setQualityStandardIds] = useState("");
   const [bisConstraints, setBisConstraints] = useState("Applicable BIS/product clauses to be confirmed");
+  const [validationResources, setValidationResources] = useState("");
   const [customerConstraints, setCustomerConstraints] = useState("");
   const [pilotQuantity, setPilotQuantity] = useState(500);
   const [pilotRateFraction, setPilotRateFraction] = useState(0.6);
@@ -158,28 +256,77 @@ export function RetrofitWorkspace({ materials, blends, routes, costBooks, onBlen
     engineer_signoff: "",
     quality_head_signoff: "",
     plant_head_signoff: "",
+    use_for_calibration: false,
+    evidence_references: "",
   });
 
   useEffect(() => {
-    if (!baselineBlendId) setBaselineBlendId(ppcBlends[0]?.blend_id ?? "");
-    if (!routeId) setRouteId(routes.find((item) => item.route_kind === "integrated")?.route_id ?? routes[0]?.route_id ?? "");
-    if (!costBookId) setCostBookId(costBooks[0]?.cost_book_id ?? "");
+    void req<EngineeringCatalog>("/api/engineering/catalog")
+      .then(setCatalog)
+      .catch(() => setCatalog(null));
+  }, []);
+
+  useEffect(() => {
+    if (!baselineBlendId || !ppcBlends.some((item) => item.blend_id === baselineBlendId)) {
+      const preferred = ppcBlends.find((item) => item.family.toLowerCase().includes("ppc")) ?? ppcBlends[0];
+      if (preferred) onBaselineBlendChange(preferred.blend_id);
+    }
+    if (!routeId || !routes.some((item) => item.route_id === routeId)) {
+      const preferred = routes.find((item) => item.route_kind === "integrated") ?? routes[0];
+      if (preferred) onRouteChange(preferred.route_id);
+    }
+    if (costBookId && !costBooks.some((item) => item.cost_book_id === costBookId)) {
+      onCostBookChange("");
+    }
     if (!calcinedClayId) setCalcinedClayId(materials.find((item) => item.material_type === "calcined_clay")?.material_id ?? "");
     if (!limestoneId) setLimestoneId(materials.find((item) => item.material_type === "limestone" && item.functional_role === "cement_addition")?.material_id ?? materials.find((item) => item.material_type === "limestone")?.material_id ?? "");
     if (!gypsumId) setGypsumId(materials.find((item) => item.functional_role === "set_regulator")?.material_id ?? "");
     if (!rawClayId) setRawClayId(materials.find((item) => ["clay", "shale", "bauxite", "laterite"].includes(item.material_type))?.material_id ?? "");
-  }, [baselineBlendId, routeId, costBookId, calcinedClayId, limestoneId, gypsumId, rawClayId, ppcBlends, routes, costBooks, materials]);
+  }, [
+    baselineBlendId,
+    routeId,
+    costBookId,
+    calcinedClayId,
+    limestoneId,
+    gypsumId,
+    rawClayId,
+    ppcBlends,
+    routes,
+    costBooks,
+    materials,
+    onBaselineBlendChange,
+    onRouteChange,
+    onCostBookChange,
+  ]);
 
   const selectedCandidate = study?.candidates.find((item) => item.candidate_id === selectedCandidateId)
     ?? study?.candidates[0]
     ?? null;
+  const selectedProductDefinition = catalog?.product_definitions.find((item) => item.product_id === productDefinitionId) ?? null;
 
-  const stageAvailable = (target: Stage): boolean => {
-    if (target === 1) return true;
-    if (target === 2) return Boolean(study);
-    if (target >= 3) return Boolean(engineeringCase);
-    return false;
-  };
+  useEffect(() => {
+    onProgressChange?.({
+      hasStudy: Boolean(study),
+      hasEngineeringCase: Boolean(engineeringCase),
+      selectedCandidateName: selectedCandidate?.name ?? null,
+    });
+  }, [study, engineeringCase, selectedCandidate, onProgressChange]);
+
+  const materialReadiness = [
+    { label: "Calcined clay", ready: Boolean(calcinedClayId), count: materials.filter((item) => ["calcined_clay", "metakaolin"].includes(item.material_type)).length },
+    { label: "Cement limestone", ready: Boolean(limestoneId), count: materials.filter((item) => item.material_type === "limestone").length },
+    { label: "Gypsum / set regulator", ready: Boolean(gypsumId), count: materials.filter((item) => item.functional_role === "set_regulator" || item.material_type === "gypsum").length },
+    { label: "Raw clay", ready: supplyMode === "purchased_calcined_clay" || Boolean(rawClayId), count: materials.filter((item) => ["clay", "shale", "bauxite", "laterite"].includes(item.material_type)).length },
+  ];
+
+  const readyToDesign = Boolean(
+    baselineBlendId
+    && routeId
+    && calcinedClayId
+    && limestoneId
+    && gypsumId
+    && (supplyMode === "purchased_calcined_clay" || rawClayId),
+  );
 
   async function design() {
     setError("");
@@ -221,7 +368,6 @@ export function RetrofitWorkspace({ materials, blends, routes, costBooks, onBlen
       });
       setStudy(nextStudy);
       setSelectedCandidateId(nextStudy.selected_candidate_id ?? nextStudy.candidates[0]?.candidate_id ?? "");
-      setStage(2);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -243,10 +389,13 @@ export function RetrofitWorkspace({ materials, blends, routes, costBooks, onBlen
             project_name: projectName,
             plant_name: plantName,
             engineer,
-            product_target: "LC3",
+            product_target: selectedProductDefinition?.name ?? "Configured cement product",
+            product_definition_id: productDefinitionId || null,
             revision,
+            quality_standard_ids: qualityStandardIds.split("\n").map((item) => item.trim()).filter(Boolean),
             bis_constraints: bisConstraints.split("\n").map((item) => item.trim()).filter(Boolean),
             customer_constraints: customerConstraints.split("\n").map((item) => item.trim()).filter(Boolean),
+            validation_resources: validationResources.split("\n").map((item) => item.trim()).filter(Boolean),
             pilot_quantity_t: pilotQuantity,
             pilot_rate_fraction: pilotRateFraction,
             monitoring_hours: monitoringHours,
@@ -255,7 +404,6 @@ export function RetrofitWorkspace({ materials, blends, routes, costBooks, onBlen
         }),
       });
       setEngineeringCase(nextCase);
-      setStage(3);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -315,6 +463,8 @@ export function RetrofitWorkspace({ materials, blends, routes, costBooks, onBlen
             engineer_signoff: actuals.engineer_signoff || null,
             quality_head_signoff: actuals.quality_head_signoff || null,
             plant_head_signoff: actuals.plant_head_signoff || null,
+            use_for_calibration: actuals.use_for_calibration,
+            evidence_references: actuals.evidence_references.split("\n").map((item) => item.trim()).filter(Boolean),
           }),
         },
       );
@@ -330,91 +480,95 @@ export function RetrofitWorkspace({ materials, blends, routes, costBooks, onBlen
     setActuals((current) => ({ ...current, [key]: value }));
   }
 
-  return (
-    <section className="guide retrofit-workspace engineering-workflow">
-      <h2>BRIXTA ENGINEERING DECISION SYSTEM</h2>
-      <p className="note">
-        A traceable workflow from engineering assumptions to simulation, recommendation, workbook, pilot production and model learning.
-        Every result carries a prediction, confidence, reason and required validation.
-      </p>
+  const copy = SECTION_COPY[section];
 
-      <div className="engineering-stage-rail">
-        {STAGES.map((item) => (
-          <button
-            type="button"
-            key={item.id}
-            className={`${stage === item.id ? "selected" : ""} ${stageAvailable(item.id) ? "" : "locked"}`}
-            disabled={!stageAvailable(item.id)}
-            onClick={() => setStage(item.id)}
-          >
-            <strong>{item.label}</strong>
-            <span>{item.subtitle}</span>
-          </button>
-        ))}
+  return (
+    <section className="guide wide-guide retrofit-workspace engineering-workflow">
+      <div className="module-heading">
+        <div>
+          <small>BRIXTA ENGINEERING WORKFLOW</small>
+          <h2>{copy.title}</h2>
+          <p>{copy.subtitle}</p>
+        </div>
+        <div className="module-status">
+          <span>{study ? "STUDY READY" : "NO STUDY"}</span>
+          <strong>{engineeringCase ? `CASE ${engineeringCase.case_id}` : "REFERENCE MODE"}</strong>
+        </div>
       </div>
 
       {error && <div className="err">{error}</div>}
 
-      {stage === 1 && (
+      {section === "materials" && (
         <>
-          <h3>STAGE 1 · ENGINEERING INPUTS</h3>
+          <section className="workflow-context-panel">
+            <div><small>MATERIAL RECORDS</small><strong>{materials.length}</strong><span>Active library inputs</span></div>
+            {materialReadiness.map((item) => <div className={item.ready ? "ready" : "missing"} key={item.label}><small>{item.label}</small><strong>{item.ready ? "READY" : "MISSING"}</strong><span>{item.count} compatible record(s)</span></div>)}
+          </section>
+
+          <h3>LC3 MATERIAL SOURCES</h3>
           <div className="form-grid two">
-            <label>PROJECT NAME<input value={projectName} onChange={(event) => setProjectName(event.target.value)} /></label>
-            <label>PLANT<input value={plantName} onChange={(event) => setPlantName(event.target.value)} /></label>
-            <label>ENGINEER<input value={engineer} onChange={(event) => setEngineer(event.target.value)} /></label>
-            <label>REVISION<input value={revision} onChange={(event) => setRevision(event.target.value)} /></label>
-            <label>EXISTING PPC BLEND
-              <select value={baselineBlendId} onChange={(event) => setBaselineBlendId(event.target.value)}>
-                {ppcBlends.map((item) => <option key={item.blend_id} value={item.blend_id}>{item.name}</option>)}
-              </select>
-            </label>
-            <label>EXISTING PLANT ROUTE
-              <select value={routeId} onChange={(event) => setRouteId(event.target.value)}>
-                {routes.map((item) => <option key={item.route_id} value={item.route_id}>{item.name} · {pretty(item.route_kind)}</option>)}
-              </select>
-            </label>
-            <label>COST BOOK
-              <select value={costBookId} onChange={(event) => setCostBookId(event.target.value)}>
-                <option value="">Reference tariffs and material placeholders</option>
-                {costBooks.map((item) => <option key={item.cost_book_id} value={item.cost_book_id}>{item.name} · v{item.version}</option>)}
-              </select>
-            </label>
-            <label>TARGET LC3 OUTPUT T/H<input type="number" min="0.1" value={targetOutput} onChange={(event) => setTargetOutput(Number(event.target.value))} /></label>
-            <label>CLAY SUPPLY PATHWAY
-              <select value={supplyMode} onChange={(event) => setSupplyMode(event.target.value as typeof supplyMode)}>
-                <option value="purchased_calcined_clay">Purchase calcined clay</option>
-                <option value="onsite_calcination">Calcine raw clay onsite</option>
-              </select>
-            </label>
-            {supplyMode === "onsite_calcination" && <label>RAW KAOLINITIC / CLAY SOURCE
-              <select value={rawClayId} onChange={(event) => setRawClayId(event.target.value)}>
-                {materials.filter((item) => ["clay", "shale", "bauxite", "laterite"].includes(item.material_type) || item.functional_role === "raw_kiln_feed").map((item) => <option key={item.material_id} value={item.material_id}>{item.name}</option>)}
-              </select>
-            </label>}
             <label>CALCINED-CLAY PRODUCT / PROXY
               <select value={calcinedClayId} onChange={(event) => setCalcinedClayId(event.target.value)}>
+                <option value="">Select a calcined-clay record</option>
                 {materials.filter((item) => ["calcined_clay", "metakaolin"].includes(item.material_type)).map((item) => <option key={item.material_id} value={item.material_id}>{item.name}</option>)}
               </select>
             </label>
             <label>CEMENT-GRADE LIMESTONE
               <select value={limestoneId} onChange={(event) => setLimestoneId(event.target.value)}>
+                <option value="">Select a limestone record</option>
                 {materials.filter((item) => item.material_type === "limestone").map((item) => <option key={item.material_id} value={item.material_id}>{item.name}</option>)}
               </select>
             </label>
             <label>GYPSUM / SET REGULATOR
               <select value={gypsumId} onChange={(event) => setGypsumId(event.target.value)}>
+                <option value="">Select a gypsum record</option>
                 {materials.filter((item) => item.functional_role === "set_regulator" || item.material_type === "gypsum").map((item) => <option key={item.material_id} value={item.material_id}>{item.name}</option>)}
               </select>
             </label>
-            <label>SHORTLIST SIZE<input type="number" min="3" max="25" value={targetCandidates} onChange={(event) => setTargetCandidates(Number(event.target.value))} /></label>
+            <label>RAW KAOLINITIC / CLAY SOURCE
+              <select value={rawClayId} onChange={(event) => setRawClayId(event.target.value)}>
+                <option value="">Select a raw-clay record</option>
+                {materials.filter((item) => ["clay", "shale", "bauxite", "laterite"].includes(item.material_type) || item.functional_role === "raw_kiln_feed").map((item) => <option key={item.material_id} value={item.material_id}>{item.name}</option>)}
+              </select>
+            </label>
+          </div>
+
+          <div className="data-flow-note">
+            <strong>DOWNSTREAM DATA FLOW</strong>
+            <span>These records supply chemistry, moisture, LOI, material cost and CO₂ to Formulation, Retrofit, Scenarios and Export. Missing fields remain explicit assumptions; they are not silently converted to zero.</span>
+          </div>
+
+          <div className="module-tool-row">
+            <button type="button" onClick={() => onOpenTool("material-editor")}>OPEN FULL MATERIAL EDITOR</button>
+            <button type="button" onClick={() => onOpenTool("library")}>OPEN VERSIONED LIBRARY</button>
+          </div>
+          <WorkflowFooter next={{ label: "NEXT STEP · FORMULATION", section: "formulation", disabled: materialReadiness.some((item) => !item.ready) }} onNavigate={onNavigate} />
+        </>
+      )}
+
+      {section === "formulation" && (
+        <>
+          <section className="workflow-context-panel compact">
+            <div><small>BASELINE FORMULATION</small><strong>{selectedName(ppcBlends, "blend_id", "name", baselineBlendId)}</strong><span>Feeds the retrofit baseline</span></div>
+            <div><small>LC3 SEARCH SPACE</small><strong>{clinkerMin}–{clinkerMax}% clinker</strong><span>{targetCandidates} candidates requested</span></div>
+            <div><small>OBJECTIVE</small><strong>COST · CO₂ · OUTPUT</strong><span>Weighted deterministic ranking</span></div>
+          </section>
+
+          <div className="form-grid two">
+            <label>EXISTING PPC / FINISHED-CEMENT BLEND
+              <select value={baselineBlendId} onChange={(event) => onBaselineBlendChange(event.target.value)}>
+                {ppcBlends.map((item) => <option key={item.blend_id} value={item.blend_id}>{item.name} · {item.family}</option>)}
+              </select>
+            </label>
+            <label>SHORTLIST SIZE<input type="number" min="3" max="25" step="1" value={targetCandidates} onChange={(event) => setTargetCandidates(Number(event.target.value))} /></label>
           </div>
 
           <h3>FORMULATION BOUNDS</h3>
           <div className="form-grid two">
-            <label>CLINKER MIN / MAX<div className="inline-inputs"><input type="number" value={clinkerMin} onChange={(event) => setClinkerMin(Number(event.target.value))} /><input type="number" value={clinkerMax} onChange={(event) => setClinkerMax(Number(event.target.value))} /></div></label>
-            <label>CALCINED CLAY MIN / MAX<div className="inline-inputs"><input type="number" value={clayMin} onChange={(event) => setClayMin(Number(event.target.value))} /><input type="number" value={clayMax} onChange={(event) => setClayMax(Number(event.target.value))} /></div></label>
-            <label>LIMESTONE MIN / MAX<div className="inline-inputs"><input type="number" value={limestoneMin} onChange={(event) => setLimestoneMin(Number(event.target.value))} /><input type="number" value={limestoneMax} onChange={(event) => setLimestoneMax(Number(event.target.value))} /></div></label>
-            <label>GYPSUM MIN / MAX<div className="inline-inputs"><input type="number" value={gypsumMin} onChange={(event) => setGypsumMin(Number(event.target.value))} /><input type="number" value={gypsumMax} onChange={(event) => setGypsumMax(Number(event.target.value))} /></div></label>
+            <label>CLINKER MIN / MAX<div className="inline-inputs"><input type="number" step="0.1" value={clinkerMin} onChange={(event) => setClinkerMin(Number(event.target.value))} /><input type="number" step="0.1" value={clinkerMax} onChange={(event) => setClinkerMax(Number(event.target.value))} /></div></label>
+            <label>CALCINED CLAY MIN / MAX<div className="inline-inputs"><input type="number" step="0.1" value={clayMin} onChange={(event) => setClayMin(Number(event.target.value))} /><input type="number" step="0.1" value={clayMax} onChange={(event) => setClayMax(Number(event.target.value))} /></div></label>
+            <label>LIMESTONE MIN / MAX<div className="inline-inputs"><input type="number" step="0.1" value={limestoneMin} onChange={(event) => setLimestoneMin(Number(event.target.value))} /><input type="number" step="0.1" value={limestoneMax} onChange={(event) => setLimestoneMax(Number(event.target.value))} /></div></label>
+            <label>GYPSUM MIN / MAX<div className="inline-inputs"><input type="number" step="0.1" value={gypsumMin} onChange={(event) => setGypsumMin(Number(event.target.value))} /><input type="number" step="0.1" value={gypsumMax} onChange={(event) => setGypsumMax(Number(event.target.value))} /></div></label>
             <label>CLAY : LIMESTONE RATIO MIN / MAX<div className="inline-inputs"><input type="number" step="0.1" value={clayLimestoneRatioMin} onChange={(event) => setClayLimestoneRatioMin(Number(event.target.value))} /><input type="number" step="0.1" value={clayLimestoneRatioMax} onChange={(event) => setClayLimestoneRatioMax(Number(event.target.value))} /></div></label>
           </div>
 
@@ -431,239 +585,278 @@ export function RetrofitWorkspace({ materials, blends, routes, costBooks, onBlen
             </div>
           </details>
 
-          <details className="basis-panel"><summary>PROJECT, BIS AND PILOT CONSTRAINTS</summary>
-            <div className="form-grid two">
-              <label>BIS / PRODUCT CONSTRAINTS<textarea rows={4} value={bisConstraints} onChange={(event) => setBisConstraints(event.target.value)} /></label>
-              <label>CUSTOMER CONSTRAINTS<textarea rows={4} value={customerConstraints} onChange={(event) => setCustomerConstraints(event.target.value)} /></label>
-              <label>PILOT QUANTITY T<input type="number" min="1" value={pilotQuantity} onChange={(event) => setPilotQuantity(Number(event.target.value))} /></label>
-              <label>PILOT RATE FRACTION<input type="number" min="0.1" max="1" step="0.05" value={pilotRateFraction} onChange={(event) => setPilotRateFraction(Number(event.target.value))} /></label>
-              <label>MONITORING HOURS<input type="number" min="1" value={monitoringHours} onChange={(event) => setMonitoringHours(Number(event.target.value))} /></label>
-              <label>ENGINEERING NOTES<textarea rows={4} value={projectNotes} onChange={(event) => setProjectNotes(event.target.value)} /></label>
-            </div>
-          </details>
-
-          <button className="run" disabled={loading || !baselineBlendId || !routeId || !calcinedClayId || !limestoneId || !gypsumId || (supplyMode === "onsite_calcination" && !rawClayId)} onClick={() => void design()}>
-            {loading ? "SOLVING ENGINEERING SCENARIOS…" : "RUN STAGE 2 · ENGINEERING SIMULATION"}
-          </button>
+          <div className="module-tool-row">
+            <button type="button" onClick={() => onOpenTool("blend-editor")}>OPEN FULL FORMULATION COMPOSER</button>
+          </div>
+          <WorkflowFooter previous={{ label: "MATERIALS", section: "materials" }} next={{ label: "NEXT STEP · PLANT", section: "plant", disabled: !baselineBlendId }} onNavigate={onNavigate} />
         </>
       )}
 
-      {stage === 2 && study && (
+      {section === "plant" && (
         <>
-          <h3>STAGE 2 · ENGINEERING SIMULATION</h3>
-          <section className="route-explainer compatible">
-            <div>
-              <strong>BASELINE · {study.baseline.blend_name}</strong>
-              <span>{study.baseline.route_name}</span>
-              <span>{formatValue(study.baseline.predicted_output_tph, " t/h")}</span>
-            </div>
-            <div>
-              <strong>DETERMINISTIC SOLVER · {study.candidates.length} SHORTLISTED</strong>
-              <span>{study.algorithm}</span>
-              <span>Calculation model {study.calculation_version}</span>
-            </div>
+          <section className="workflow-context-panel compact">
+            <div><small>PLANT ROUTE</small><strong>{selectedName(routes, "route_id", "name", routeId)}</strong><span>Equipment and process topology</span></div>
+            <div><small>COMMERCIAL BASIS</small><strong>{selectedName(costBooks, "cost_book_id", "name", costBookId)}</strong><span>{costBookId ? "Versioned cost book" : "Reference placeholders"}</span></div>
+            <div><small>PRODUCTION TARGET</small><strong>{targetOutput.toFixed(1)} t/h</strong><span>LC3 design basis</span></div>
           </section>
 
-          <h3>PARETO / OPTIMISED CANDIDATES</h3>
-          <div className="recommendation-grid">
-            {study.candidates.map((candidate) => (
-              <button
-                type="button"
-                key={candidate.candidate_id}
-                className={selectedCandidate?.candidate_id === candidate.candidate_id ? "selected" : ""}
-                onClick={() => setSelectedCandidateId(candidate.candidate_id)}
-              >
-                <strong>#{candidate.rank} · {candidate.name}{candidate.pareto_efficient ? " · PARETO" : ""}</strong>
-                <span>{rolePercent(candidate, "clinker").toFixed(1)}% clinker · {rolePercent(candidate, "calcined_clay").toFixed(1)}% clay · {rolePercent(candidate, "limestone").toFixed(1)}% limestone · {rolePercent(candidate, "gypsum").toFixed(1)}% gypsum</span>
-                <span>{formatValue(candidate.predicted_output_tph, " t/h")} · {formatValue(candidate.electricity_kwh_t, " kWh/t")} · {formatValue(candidate.thermal_kcal_kg, " kcal/kg", 0)}</span>
-                <span>{formatValue(candidate.total_variable_cost_inr_t, " INR/t", 0)} · {formatValue(candidate.material_co2_kg_t, " kg CO₂/t", 0)}</span>
-                <span>Robustness {candidate.robustness_score.toFixed(0)}/100 · complexity {candidate.retrofit_complexity_score.toFixed(0)}/100</span>
-              </button>
-            ))}
+          <div className="form-grid two">
+            <label>PROJECT NAME<input value={projectName} onChange={(event) => setProjectName(event.target.value)} /></label>
+            <label>PLANT<input value={plantName} onChange={(event) => setPlantName(event.target.value)} /></label>
+            <label>ENGINEER<input value={engineer} onChange={(event) => setEngineer(event.target.value)} /></label>
+            <label>REVISION<input value={revision} onChange={(event) => setRevision(event.target.value)} /></label>
+            <label>CONFIGURED PRODUCT DEFINITION
+              <select value={productDefinitionId} onChange={(event) => setProductDefinitionId(event.target.value)}>
+                {(catalog?.product_definitions ?? []).map((item) => <option key={item.product_id} value={item.product_id}>{item.name} · {item.family}</option>)}
+              </select>
+            </label>
+            <label>QUALITY STANDARD IDS / REVISIONS<textarea rows={3} value={qualityStandardIds} onChange={(event) => setQualityStandardIds(event.target.value)} placeholder="One versioned standard or plant specification per line" /></label>
+            <label>EXISTING PLANT ROUTE
+              <select value={routeId} onChange={(event) => onRouteChange(event.target.value)}>
+                {routes.map((item) => <option key={item.route_id} value={item.route_id}>{item.name} · {pretty(item.route_kind)}</option>)}
+              </select>
+            </label>
+            <label>COST BOOK
+              <select value={costBookId} onChange={(event) => onCostBookChange(event.target.value)}>
+                <option value="">Reference tariffs and material placeholders</option>
+                {costBooks.map((item) => <option key={item.cost_book_id} value={item.cost_book_id}>{item.name} · v{item.version}</option>)}
+              </select>
+            </label>
+            <label>TARGET PRODUCT OUTPUT T/H<input type="number" min="0.1" step="0.1" value={targetOutput} onChange={(event) => onTargetOutputChange(Number(event.target.value))} /></label>
+            <label>CLAY SUPPLY PATHWAY
+              <select value={supplyMode} onChange={(event) => setSupplyMode(event.target.value as typeof supplyMode)}>
+                <option value="purchased_calcined_clay">Purchase calcined clay</option>
+                <option value="onsite_calcination">Calcine raw clay onsite</option>
+              </select>
+            </label>
+            <label>BIS / PRODUCT CONSTRAINTS<textarea rows={4} value={bisConstraints} onChange={(event) => setBisConstraints(event.target.value)} /></label>
+            <label>CUSTOMER CONSTRAINTS<textarea rows={4} value={customerConstraints} onChange={(event) => setCustomerConstraints(event.target.value)} /></label>
+            <label>AVAILABLE VALIDATION RESOURCES<textarea rows={4} value={validationResources} onChange={(event) => setValidationResources(event.target.value)} placeholder="Examples: XRF, XRD, free lime, compressive strength, power meter, kiln heat balance" /></label>
+            <label>CONFIGURED PRODUCT REQUIREMENTS<textarea rows={4} readOnly value={selectedProductDefinition ? [...selectedProductDefinition.required_process_capabilities, ...selectedProductDefinition.required_validation].join("\n") : "Product catalog unavailable"} /></label>
+            <label>PILOT QUANTITY T<input type="number" min="1" step="1" value={pilotQuantity} onChange={(event) => setPilotQuantity(Number(event.target.value))} /></label>
+            <label>PILOT RATE FRACTION<input type="number" min="0.1" max="1" step="0.05" value={pilotRateFraction} onChange={(event) => setPilotRateFraction(Number(event.target.value))} /></label>
+            <label>MONITORING HOURS<input type="number" min="1" step="1" value={monitoringHours} onChange={(event) => setMonitoringHours(Number(event.target.value))} /></label>
+            <label>ENGINEERING NOTES<textarea rows={4} value={projectNotes} onChange={(event) => setProjectNotes(event.target.value)} /></label>
           </div>
 
-          {selectedCandidate && (
-            <>
-              <section className="summary-grid">
-                <div><small>OUTPUT</small><strong>{formatValue(selectedCandidate.predicted_output_tph, " t/h")}</strong><span>{formatValue(selectedCandidate.output_delta_vs_ppc_tph, " t/h vs PPC")}</span></div>
-                <div><small>BOTTLENECK</small><strong>{selectedCandidate.bottleneck_machine_name ?? "N/A"}</strong></div>
-                <div><small>VARIABLE COST</small><strong>{formatValue(selectedCandidate.total_variable_cost_inr_t, " INR/t", 0)}</strong><span>{formatValue(selectedCandidate.material_cost_delta_vs_ppc_inr_t, " INR/t material delta", 0)}</span></div>
-                <div><small>MATERIAL CO₂</small><strong>{formatValue(selectedCandidate.material_co2_kg_t, " kg/t", 0)}</strong><span>{formatValue(selectedCandidate.material_co2_delta_vs_ppc_kg_t, " kg/t vs PPC", 0)}</span></div>
-                <div><small>ROBUSTNESS</small><strong>{selectedCandidate.robustness_score.toFixed(0)}/100</strong></div>
-                <div><small>DETERMINISTIC SCORE</small><strong>{selectedCandidate.deterministic_score.toFixed(1)}</strong></div>
-              </section>
-
-              <h3>MULTI-LEVEL FORMULATION CHAIN</h3>
-              <div className="recommendation-grid">
-                {selectedCandidate.formulation_chain.map((formulationStage) => <div key={formulationStage.level}>
-                  <strong>{pretty(formulationStage.level)} · {formulationStage.name}</strong>
-                  <span>{formulationStage.purpose}</span>
-                  <span>Inputs: {formulationStage.inputs.join(" · ") || "N/A"}</span>
-                  <span>Outputs: {formulationStage.outputs.join(" · ") || "N/A"}</span>
-                </div>)}
-              </div>
-
-              <h3>ROBUSTNESS STRESS TEST</h3>
-              <table><thead><tr><th>Scenario</th><th>Formulation</th><th>Output</th><th>Electricity</th><th>Thermal</th><th>Cost</th><th>Chemistry</th></tr></thead><tbody>
-                {selectedCandidate.stress_tests.map((item) => <tr key={item.scenario}><td>{pretty(item.scenario)}</td><td>{item.clinker_percent}/{item.calcined_clay_percent}/{item.limestone_percent}/{item.gypsum_percent}</td><td>{formatValue(item.predicted_output_tph, " t/h")}</td><td>{formatValue(item.electricity_kwh_t, " kWh/t")}</td><td>{formatValue(item.thermal_kcal_kg, " kcal/kg", 0)}</td><td>{formatValue(item.total_variable_cost_inr_t, " INR/t", 0)}</td><td>{item.chemistry_complete ? "Complete" : `Missing ${item.unknown_chemistry_fields.join(", ")}`}</td></tr>)}
-              </tbody></table>
-
-              <button className="run" disabled={caseLoading} onClick={() => void generateEngineeringCase()}>
-                {caseLoading ? "GENERATING AUDITABLE RECOMMENDATIONS…" : "RUN STAGE 3 · GENERATE ENGINEERING RECOMMENDATION"}
-              </button>
-            </>
-          )}
+          <div className="module-tool-row three">
+            <button type="button" onClick={() => onOpenTool("machine-editor")}>EDIT MACHINES</button>
+            <button type="button" onClick={() => onOpenTool("route-editor")}>EDIT PROCESS ROUTE</button>
+            <button type="button" onClick={() => onOpenTool("cost-editor")}>EDIT COSTS & TARIFFS</button>
+          </div>
+          <WorkflowFooter previous={{ label: "FORMULATION", section: "formulation" }} next={{ label: "NEXT STEP · ENGINEERING DECISION", section: "retrofit", disabled: !routeId || targetOutput <= 0 || !productDefinitionId }} onNavigate={onNavigate} />
         </>
       )}
 
-      {stage === 3 && engineeringCase && (
+      {section === "retrofit" && (
         <>
-          <h3>STAGE 3 · ENGINEERING RECOMMENDATION</h3>
-          <section className={`engineering-decision-banner risk-${engineeringCase.risk_rating}`}>
-            <div><small>CASE</small><strong>{engineeringCase.case_id}</strong><span>{engineeringCase.project.project_name} · {engineeringCase.project.revision}</span></div>
-            <div><small>CONFIDENCE</small><strong>{engineeringCase.confidence_percent.toFixed(1)}%</strong><span>{engineeringCase.confidence_band.toUpperCase()}</span></div>
-            <div><small>RISK</small><strong>{engineeringCase.risk_rating.toUpperCase()}</strong><span>{engineeringCase.calibration_sample_count} plant calibration record(s)</span></div>
+          <section className="retrofit-readiness">
+            <div>
+              <small>FORMULATION</small>
+              <strong>{selectedName(ppcBlends, "blend_id", "name", baselineBlendId)}</strong>
+              <span>Clinker {clinkerMin}–{clinkerMax}% · clay {clayMin}–{clayMax}% · limestone {limestoneMin}–{limestoneMax}%</span>
+            </div>
+            <div>
+              <small>PLANT</small>
+              <strong>{selectedName(routes, "route_id", "name", routeId)}</strong>
+              <span>{targetOutput.toFixed(1)} t/h target · {pretty(supplyMode)}</span>
+            </div>
+            <div className={readyToDesign ? "ready" : "missing"}>
+              <small>READINESS</small>
+              <strong>{readyToDesign ? "READY TO SOLVE" : "INPUTS INCOMPLETE"}</strong>
+              <span>{readyToDesign ? "All required references resolved" : "Return to Materials, Formulation or Plant"}</span>
+            </div>
           </section>
-          <div className="engineering-executive">{engineeringCase.executive_summary}</div>
-
-          <h3>PREDICTION · CONFIDENCE · REASON · REQUIRED VALIDATION</h3>
-          <div className="engineering-prediction-grid">
-            {engineeringCase.predictions.map((item) => (
-              <article key={item.code} className={`engineering-prediction risk-${item.risk}`}>
-                <small>{pretty(item.category)}</small>
-                <strong>{item.label}</strong>
-                <b>{predictionValue(item)}</b>
-                <span>Confidence {item.confidence_percent.toFixed(0)}% · {item.confidence_band.toUpperCase()}</span>
-                <p>{item.reason}</p>
-                <details><summary>Required validation</summary><ul>{item.required_validation.map((entry) => <li key={entry}>{entry}</li>)}</ul></details>
-              </article>
-            ))}
-          </div>
-
-          <h3>ENGINEERING ACTIONS</h3>
-          <div className="engineering-recommendations">
-            {engineeringCase.recommendations.map((recommendation) => (
-              <article key={recommendation.recommendation_id} className={`engineering-recommendation risk-${recommendation.risk}`}>
-                <header><strong>{recommendation.priority} · {recommendation.title}</strong><span>{recommendation.discipline} · confidence {recommendation.confidence_percent.toFixed(0)}%</span></header>
-                <table><thead><tr><th>Parameter</th><th>Current</th><th>Recommended</th><th>Change</th><th>Rationale</th></tr></thead><tbody>
-                  {recommendation.actions.map((action) => <tr key={`${recommendation.recommendation_id}-${action.parameter}`}><td>{action.parameter}</td><td>{action.current_value ?? "N/A"}</td><td>{action.recommended_value ?? "N/A"} {action.unit ?? ""}</td><td>{action.change ?? "—"}</td><td>{action.rationale}</td></tr>)}
-                </tbody></table>
-                <p><b>Proceed condition:</b> {recommendation.proceed_condition}</p>
-                <details><summary>Reasons and required validation</summary><ul>{recommendation.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul><h4>Validation</h4><ul>{recommendation.required_validation.map((entry) => <li key={entry}>{entry}</li>)}</ul></details>
-              </article>
-            ))}
-          </div>
 
           <div className="action-row">
-            <button onClick={() => setStage(4)}>CONTINUE TO STAGE 4 · WORKBOOK</button>
-            <button disabled={saving} onClick={() => void saveCandidate()}>{saving ? "SAVING…" : "SAVE SELECTED LC3 BLEND"}</button>
-          </div>
-        </>
-      )}
-
-      {stage === 4 && engineeringCase && (
-        <>
-          <h3>STAGE 4 · ENGINEERING WORKBOOK</h3>
-          <p className="note">
-            The workbook contains cover, project, assumption, missing-data, input, calculation, validation, decision, pilot and learning sheets. Blue cells are plant inputs; yellow cells are BRIXTA assumptions; grey cells are formulas; green cells are recorded actuals.
-          </p>
-          <section className="summary-grid">
-            <div><small>WORKBOOK CASE</small><strong>{engineeringCase.case_id}</strong></div>
-            <div><small>REVISION</small><strong>{engineeringCase.project.revision}</strong></div>
-            <div><small>MISSING DATA</small><strong>{engineeringCase.missing_data.length}</strong></div>
-            <div><small>RECOMMENDATIONS</small><strong>{engineeringCase.recommendations.length}</strong></div>
-            <div><small>RISK</small><strong>{engineeringCase.risk_rating.toUpperCase()}</strong></div>
-            <div><small>CONFIDENCE</small><strong>{engineeringCase.confidence_percent.toFixed(1)}%</strong></div>
-          </section>
-
-          <a className="run button-link" href={`${API}/api/engineering/cases/${engineeringCase.case_id}/export.xlsx`} target="_blank" rel="noreferrer">EXPORT COMPLETE ENGINEERING WORKBOOK</a>
-
-          <h3>DATA THE PLANT MUST REPLACE OR VERIFY</h3>
-          <table><thead><tr><th>Category</th><th>Data item</th><th>Why required</th></tr></thead><tbody>
-            {engineeringCase.missing_data.map((item) => <tr key={`${item.category}-${item.item}`}><td>{pretty(item.category)}</td><td>{item.item}</td><td>{item.reason}</td></tr>)}
-          </tbody></table>
-
-          <button className="run" onClick={() => setStage(5)}>CONTINUE TO STAGE 5 · PILOT BATCH</button>
-        </>
-      )}
-
-      {stage === 5 && engineeringCase && (
-        <>
-          <h3>STAGE 5 · PILOT PRODUCTION</h3>
-          <section className="summary-grid">
-            <div><small>PILOT QUANTITY</small><strong>{engineeringCase.pilot_plan.pilot_quantity_t.toFixed(0)} t</strong></div>
-            <div><small>PILOT RATE</small><strong>{formatValue(engineeringCase.pilot_plan.pilot_rate_tph, " t/h")}</strong></div>
-            <div><small>SAMPLING ITEMS</small><strong>{engineeringCase.pilot_plan.sampling_plan.length}</strong></div>
-            <div><small>LAB TESTS</small><strong>{engineeringCase.pilot_plan.required_lab_tests.length}</strong></div>
-            <div><small>GO / NO-GO</small><strong>{engineeringCase.pilot_plan.go_no_go_criteria.length}</strong></div>
-            <div><small>MONITORING</small><strong>{monitoringHours} h</strong></div>
-          </section>
-
-          <h3>PILOT FORMULATION</h3>
-          <table><thead><tr><th>Role</th><th>Material</th><th>Dosage</th></tr></thead><tbody>
-            {engineeringCase.pilot_plan.formulation.map((item) => <tr key={String(item.role)}><td>{pretty(String(item.role))}</td><td>{String(item.material)}</td><td>{Number(item.percentage).toFixed(2)}%</td></tr>)}
-          </tbody></table>
-
-          <h3>MACHINE, KILN AND MILL SETTINGS</h3>
-          <table><thead><tr><th>Area</th><th>Parameter</th><th>Target</th><th>Basis</th><th>Validation</th></tr></thead><tbody>
-            {[...engineeringCase.pilot_plan.machine_settings, ...engineeringCase.pilot_plan.kiln_settings, ...engineeringCase.pilot_plan.mill_settings].map((item) => <tr key={`${item.area}-${item.parameter}`}><td>{pretty(item.area)}</td><td>{item.parameter}</td><td>{item.target ?? "N/A"} {item.unit ?? ""}</td><td>{item.basis}</td><td>{item.validation}</td></tr>)}
-          </tbody></table>
-
-          <div className="engineering-list-grid">
-            <section><h4>SAMPLING PLAN</h4><ol>{engineeringCase.pilot_plan.sampling_plan.map((item) => <li key={item}>{item}</li>)}</ol></section>
-            <section><h4>REQUIRED LAB TESTS</h4><ol>{engineeringCase.pilot_plan.required_lab_tests.map((item) => <li key={item}>{item}</li>)}</ol></section>
-            <section><h4>GO / NO-GO CRITERIA</h4><ol>{engineeringCase.pilot_plan.go_no_go_criteria.map((item) => <li key={item}>{item}</li>)}</ol></section>
-            <section><h4>MONITORING PLAN</h4><ol>{engineeringCase.pilot_plan.monitoring_plan.map((item) => <li key={item}>{item}</li>)}</ol></section>
+            <button className="run" disabled={loading || !readyToDesign} onClick={() => void design()}>
+              {loading ? "SOLVING ENGINEERING SCENARIOS…" : study ? "RE-RUN RETROFIT DESIGN" : "RUN RETROFIT DESIGN"}
+            </button>
           </div>
 
-          <button className="run" onClick={() => setStage(6)}>CONTINUE TO STAGE 6 · IMPORT ACTUALS</button>
-        </>
-      )}
+          {!study && <div className="empty-workflow-state"><strong>No retrofit study yet.</strong><span>The solver will prune infeasible formulations, rank Pareto candidates, stress-test variability and identify plant asset gaps.</span></div>}
 
-      {stage === 6 && engineeringCase && (
-        <>
-          <h3>STAGE 6 · LEARNING AND RECALIBRATION</h3>
-          <p className="note">Import pilot or plant actuals. BRIXTA compares them with the prediction, calculates error, updates confidence and stores a median plant/product calibration profile for future cases.</p>
-          <div className="form-grid two">
-            <label>ACTUAL OUTPUT T/H<input value={actuals.actual_output_tph} onChange={(event) => updateActual("actual_output_tph", event.target.value)} /></label>
-            <label>ACTUAL ELECTRICITY KWH/T<input value={actuals.actual_electricity_kwh_t} onChange={(event) => updateActual("actual_electricity_kwh_t", event.target.value)} /></label>
-            <label>ACTUAL THERMAL KCAL/KG<input value={actuals.actual_thermal_kcal_kg} onChange={(event) => updateActual("actual_thermal_kcal_kg", event.target.value)} /></label>
-            <label>ACTUAL VARIABLE COST INR/T<input value={actuals.actual_variable_cost_inr_t} onChange={(event) => updateActual("actual_variable_cost_inr_t", event.target.value)} /></label>
-            <label>ACTUAL MATERIAL CO₂ KG/T<input value={actuals.actual_material_co2_kg_t} onChange={(event) => updateActual("actual_material_co2_kg_t", event.target.value)} /></label>
-            <label>ACTUAL FREE LIME %<input value={actuals.actual_free_lime_percent} onChange={(event) => updateActual("actual_free_lime_percent", event.target.value)} /></label>
-            <label>ACTUAL 3-DAY STRENGTH MPA<input value={actuals.actual_strength_3d_mpa} onChange={(event) => updateActual("actual_strength_3d_mpa", event.target.value)} /></label>
-            <label>ACTUAL 28-DAY STRENGTH MPA<input value={actuals.actual_strength_28d_mpa} onChange={(event) => updateActual("actual_strength_28d_mpa", event.target.value)} /></label>
-            <label>XRF COMPARISON<textarea rows={3} value={actuals.xrf_comparison} onChange={(event) => updateActual("xrf_comparison", event.target.value)} /></label>
-            <label>XRD COMPARISON<textarea rows={3} value={actuals.xrd_comparison} onChange={(event) => updateActual("xrd_comparison", event.target.value)} /></label>
-            <label>POWER OBSERVATION<textarea rows={3} value={actuals.power_observation} onChange={(event) => updateActual("power_observation", event.target.value)} /></label>
-            <label>COAL / FUEL OBSERVATION<textarea rows={3} value={actuals.coal_observation} onChange={(event) => updateActual("coal_observation", event.target.value)} /></label>
-            <label>THERMAL OBSERVATION<textarea rows={3} value={actuals.thermal_observation} onChange={(event) => updateActual("thermal_observation", event.target.value)} /></label>
-            <label>ROOT CAUSE<textarea rows={3} value={actuals.root_cause} onChange={(event) => updateActual("root_cause", event.target.value)} /></label>
-            <label>COMMENTS<textarea rows={3} value={actuals.comments} onChange={(event) => updateActual("comments", event.target.value)} /></label>
-            <label>DECISION<select value={actuals.decision} onChange={(event) => updateActual("decision", event.target.value as Actuals["decision"])}><option value="hold">HOLD</option><option value="proceed">PROCEED</option><option value="reject">REJECT</option></select></label>
-            <label>ENGINEER SIGN-OFF<input value={actuals.engineer_signoff} onChange={(event) => updateActual("engineer_signoff", event.target.value)} /></label>
-            <label>QUALITY HEAD SIGN-OFF<input value={actuals.quality_head_signoff} onChange={(event) => updateActual("quality_head_signoff", event.target.value)} /></label>
-            <label>PLANT HEAD SIGN-OFF<input value={actuals.plant_head_signoff} onChange={(event) => updateActual("plant_head_signoff", event.target.value)} /></label>
-          </div>
-          <button className="run" disabled={learningLoading} onClick={() => void importActuals()}>{learningLoading ? "CALCULATING PREDICTION ERROR…" : "IMPORT ACTUALS AND RECALIBRATE"}</button>
-
-          {learning && (
+          {study && (
             <>
-              <section className="summary-grid">
-                <div><small>MAPE</small><strong>{learning.mean_absolute_percent_error === null ? "N/A" : `${learning.mean_absolute_percent_error.toFixed(2)}%`}</strong></div>
-                <div><small>CONFIDENCE BEFORE</small><strong>{learning.confidence_before_percent.toFixed(1)}%</strong></div>
-                <div><small>CONFIDENCE AFTER</small><strong>{learning.confidence_after_percent.toFixed(1)}%</strong></div>
-                <div><small>CALIBRATION SAMPLES</small><strong>{learning.calibration_sample_count}</strong></div>
+              <section className="route-explainer compatible">
+                <div><strong>BASELINE · {study.baseline.blend_name}</strong><span>{study.baseline.route_name}</span><span>{formatValue(study.baseline.predicted_output_tph, " t/h")}</span></div>
+                <div><strong>{study.candidates.length} SHORTLISTED CANDIDATES</strong><span>{study.algorithm}</span><span>Calculation model {study.calculation_version}</span></div>
               </section>
-              <div className="engineering-executive">{learning.learning_summary}</div>
-              <table><thead><tr><th>Metric</th><th>Predicted</th><th>Actual</th><th>Absolute error</th><th>% error</th><th>Correction factor</th></tr></thead><tbody>
-                {learning.prediction_errors.map((item) => <tr key={item.metric}><td>{pretty(item.metric)}</td><td>{item.predicted ?? "N/A"}</td><td>{item.actual ?? "N/A"}</td><td>{item.absolute_error?.toFixed(3) ?? "N/A"}</td><td>{item.percent_error?.toFixed(2) ?? "N/A"}</td><td>{item.recalibration_factor?.toFixed(4) ?? "N/A"}</td></tr>)}
-              </tbody></table>
-              <a className="run button-link" href={`${API}/api/engineering/cases/${engineeringCase.case_id}/export.xlsx`} target="_blank" rel="noreferrer">RE-EXPORT WORKBOOK WITH ACTUALS AND LEARNING</a>
+
+              <h3>PARETO / OPTIMISED CANDIDATES</h3>
+              <div className="recommendation-grid">
+                {study.candidates.map((candidate) => (
+                  <button type="button" key={candidate.candidate_id} className={selectedCandidate?.candidate_id === candidate.candidate_id ? "selected" : ""} onClick={() => setSelectedCandidateId(candidate.candidate_id)}>
+                    <strong>#{candidate.rank} · {candidate.name}{candidate.pareto_efficient ? " · PARETO" : ""}</strong>
+                    <span>{rolePercent(candidate, "clinker").toFixed(1)}% clinker · {rolePercent(candidate, "calcined_clay").toFixed(1)}% clay · {rolePercent(candidate, "limestone").toFixed(1)}% limestone · {rolePercent(candidate, "gypsum").toFixed(1)}% gypsum</span>
+                    <span>{formatValue(candidate.predicted_output_tph, " t/h")} · {formatValue(candidate.electricity_kwh_t, " kWh/t")} · {formatValue(candidate.thermal_kcal_kg, " kcal/kg", 0)}</span>
+                    <span>{formatValue(candidate.total_variable_cost_inr_t, " INR/t", 0)} · {formatValue(candidate.material_co2_kg_t, " kg CO₂/t", 0)}</span>
+                    <span>Robustness {candidate.robustness_score.toFixed(0)}/100 · complexity {candidate.retrofit_complexity_score.toFixed(0)}/100</span>
+                  </button>
+                ))}
+              </div>
+
+              {selectedCandidate && (
+                <>
+                  <section className="summary-grid">
+                    <div><small>OUTPUT</small><strong>{formatValue(selectedCandidate.predicted_output_tph, " t/h")}</strong><span>{formatValue(selectedCandidate.output_delta_vs_ppc_tph, " t/h vs PPC")}</span></div>
+                    <div><small>BOTTLENECK</small><strong>{selectedCandidate.bottleneck_machine_name ?? "N/A"}</strong></div>
+                    <div><small>VARIABLE COST</small><strong>{formatValue(selectedCandidate.total_variable_cost_inr_t, " INR/t", 0)}</strong><span>{formatValue(selectedCandidate.material_cost_delta_vs_ppc_inr_t, " INR/t material delta", 0)}</span></div>
+                    <div><small>MATERIAL CO₂</small><strong>{formatValue(selectedCandidate.material_co2_kg_t, " kg/t", 0)}</strong><span>{formatValue(selectedCandidate.material_co2_delta_vs_ppc_kg_t, " kg/t vs PPC", 0)}</span></div>
+                    <div><small>ROBUSTNESS</small><strong>{selectedCandidate.robustness_score.toFixed(0)}/100</strong></div>
+                    <div><small>SCORE</small><strong>{selectedCandidate.deterministic_score.toFixed(1)}</strong></div>
+                  </section>
+
+                  <h3>MISSING / RETROFIT ASSETS</h3>
+                  <div className="recommendation-grid">
+                    {selectedCandidate.missing_assets.length ? selectedCandidate.missing_assets.map((gap) => <div key={gap.asset_code}><strong>{gap.requirement.toUpperCase()} · {gap.asset_name}</strong><span>{gap.reason}</span><span>{gap.reference_capacity_tph === null ? "Capacity to be engineered" : `${gap.reference_capacity_tph.toFixed(1)} t/h reference capacity`}</span></div>) : <div><strong>NO REQUIRED ASSET GAP FOUND</strong><span>The selected route still requires plant verification.</span></div>}
+                  </div>
+
+                  <details open><summary>ROBUSTNESS / SENSITIVITY STRESS TEST</summary>
+                    <div className="table-responsive"><table><thead><tr><th>Scenario</th><th>Formulation</th><th>Output</th><th>Electricity</th><th>Thermal</th><th>Cost</th><th>Chemistry</th></tr></thead><tbody>
+                      {selectedCandidate.stress_tests.map((item) => <tr key={item.scenario}><td>{pretty(item.scenario)}</td><td>{item.clinker_percent}/{item.calcined_clay_percent}/{item.limestone_percent}/{item.gypsum_percent}</td><td>{formatValue(item.predicted_output_tph, " t/h")}</td><td>{formatValue(item.electricity_kwh_t, " kWh/t")}</td><td>{formatValue(item.thermal_kcal_kg, " kcal/kg", 0)}</td><td>{formatValue(item.total_variable_cost_inr_t, " INR/t", 0)}</td><td>{item.chemistry_complete ? "Complete" : `Missing ${item.unknown_chemistry_fields.join(", ")}`}</td></tr>)}
+                    </tbody></table></div>
+                  </details>
+
+                  <div className="action-row">
+                    <button disabled={saving} onClick={() => void saveCandidate()}>{saving ? "SAVING…" : "SAVE SELECTED LC3 FORMULATION"}</button>
+                    <button className="run" disabled={caseLoading} onClick={() => void generateEngineeringCase()}>{caseLoading ? "GENERATING…" : engineeringCase ? "RE-GENERATE ENGINEERING CASE" : "GENERATE ENGINEERING RECOMMENDATION"}</button>
+                  </div>
+                </>
+              )}
+
+              {engineeringCase && (
+                <>
+                  <div className={`engineering-decision-banner risk-${engineeringCase.risk_rating}`}>
+                    <div><small>ENGINEERING DECISION CASE</small><strong>{engineeringCase.status.toUpperCase()}</strong><span>{engineeringCase.executive_summary}</span></div>
+                    <div><small>CONFIDENCE</small><strong>{engineeringCase.confidence_percent.toFixed(1)}%</strong><span>{engineeringCase.confidence_band.toUpperCase()}</span></div>
+                    <div><small>RISK</small><strong>{engineeringCase.risk_rating.toUpperCase()}</strong><span>{engineeringCase.missing_data.length} missing data item(s)</span></div>
+                  </div>
+
+                  <TrustCenter engineeringCase={engineeringCase} />
+
+                  <h3>ENGINEERING RECOMMENDATIONS</h3>
+                  <div className="engineering-recommendations">
+                    {engineeringCase.recommendations.map((recommendation) => <article className={`engineering-recommendation risk-${recommendation.risk}`} key={recommendation.recommendation_id}>
+                      <header><strong>{recommendation.priority} · {recommendation.title}</strong><span>{recommendation.discipline} · {pretty(recommendation.recommendation_authority)} · confidence {recommendation.confidence_percent.toFixed(0)}%</span></header>
+                      <p>{recommendation.reasons.join(" · ")}</p>
+                      <div className="key-values">{recommendation.actions.map((action) => <><span key={`${recommendation.recommendation_id}-${action.parameter}-label`}>{action.parameter}</span><strong key={`${recommendation.recommendation_id}-${action.parameter}-value`}>{String(action.current_value ?? "N/A")} → {String(action.recommended_value ?? "N/A")} {action.unit ?? ""}</strong></>)}</div>
+                      <p><b>Validation:</b> {recommendation.required_validation.join(" · ") || "Plant review"}</p>
+                      <p><b>Failure modes:</b> {recommendation.potential_failure_modes.join(" · ") || "Discipline review required"}</p>
+                      <p><b>Rollback:</b> {recommendation.rollback_criteria.join(" · ") || "Return to approved baseline"}</p>
+                      <p><b>Approvals:</b> {recommendation.approval_requirements.join(" · ") || "Plant approval required"}</p>
+                    </article>)}
+                  </div>
+                </>
+              )}
             </>
           )}
+
+          <WorkflowFooter previous={{ label: "PLANT", section: "plant" }} next={{ label: "NEXT STEP · SCENARIOS", section: "scenarios", disabled: !study }} onNavigate={onNavigate} />
+        </>
+      )}
+
+      {section === "export" && (
+        <>
+          {!engineeringCase && (
+            <div className="empty-workflow-state">
+              <strong>No auditable engineering case is available.</strong>
+              <span>Return to Retrofit, select a candidate and generate the engineering recommendation before exporting.</span>
+              <button className="run" type="button" onClick={() => onNavigate("retrofit")}>RETURN TO RETROFIT</button>
+            </div>
+          )}
+
+          {engineeringCase && (
+            <>
+              <div className={`engineering-decision-banner risk-${engineeringCase.risk_rating}`}>
+                <div><small>PROJECT</small><strong>{engineeringCase.project.project_name}</strong><span>{engineeringCase.project.plant_name} · revision {engineeringCase.project.revision}</span></div>
+                <div><small>CONFIDENCE</small><strong>{engineeringCase.confidence_percent.toFixed(1)}%</strong><span>{engineeringCase.confidence_band.toUpperCase()}</span></div>
+                <div><small>DECISION RISK</small><strong>{engineeringCase.risk_rating.toUpperCase()}</strong><span>{engineeringCase.status.toUpperCase()}</span></div>
+              </div>
+
+              <div className="export-action-grid">
+                <a className="run button-link export-primary" href={`${API}/api/engineering/cases/${engineeringCase.case_id}/package.zip`} target="_blank" rel="noreferrer">EXPORT DIGITAL ENGINEERING PACKAGE</a>
+                <a className="button-link" href={`${API}/api/engineering/cases/${engineeringCase.case_id}/export.xlsx`} target="_blank" rel="noreferrer">EXPORT WORKBOOK ONLY</a>
+              </div>
+
+              <TrustCenter engineeringCase={engineeringCase} compact />
+
+              <section className="summary-grid">
+                <div><small>WORKBOOK CASE</small><strong>{engineeringCase.case_id}</strong></div>
+                <div><small>PREDICTIONS</small><strong>{engineeringCase.predictions.length}</strong></div>
+                <div><small>RECOMMENDATIONS</small><strong>{engineeringCase.recommendations.length}</strong></div>
+                <div><small>MISSING DATA</small><strong>{engineeringCase.missing_data.length}</strong></div>
+                <div><small>PILOT QUANTITY</small><strong>{engineeringCase.pilot_plan.pilot_quantity_t.toFixed(0)} t</strong></div>
+                <div><small>MONITORING</small><strong>{monitoringHours} h</strong></div>
+              </section>
+
+              <details open><summary>PREDICTION / CONFIDENCE / REASON / REQUIRED VALIDATION</summary>
+                <div className="engineering-prediction-grid">
+                  {engineeringCase.predictions.map((prediction) => <article className={`engineering-prediction risk-${prediction.risk}`} key={prediction.code}><small>{prediction.category} · {prediction.confidence_percent.toFixed(0)}% earned confidence</small><strong>{prediction.label}</strong><b>{predictionValue(prediction)}</b><p><b>Interval:</b> {prediction.prediction_interval?.low === null || prediction.prediction_interval?.high === null ? "Qualitative / not applicable" : `${prediction.prediction_interval?.low} to ${prediction.prediction_interval?.high} ${prediction.unit ?? ""}`}</p><p>{prediction.reason}</p><p><b>Method:</b> {prediction.method}</p><p><b>Critical assumptions:</b> {prediction.critical_assumptions.join(" · ") || "None registered"}</p><p><b>Sensitive variables:</b> {prediction.sensitive_variables.join(" · ") || "Not resolved"}</p><p><b>Unknowns:</b> {prediction.unknown_inputs.join(" · ") || "No declared unknown"}</p><p><b>Validate:</b> {prediction.required_validation.join(" · ") || "Plant review"}</p></article>)}
+                </div>
+              </details>
+
+              <details open><summary>PILOT PRODUCTION PLAN</summary>
+                <section className="summary-grid">
+                  <div><small>PILOT QUANTITY</small><strong>{engineeringCase.pilot_plan.pilot_quantity_t.toFixed(0)} t</strong></div>
+                  <div><small>PILOT RATE</small><strong>{formatValue(engineeringCase.pilot_plan.pilot_rate_tph, " t/h")}</strong></div>
+                  <div><small>SAMPLING ITEMS</small><strong>{engineeringCase.pilot_plan.sampling_plan.length}</strong></div>
+                  <div><small>LAB TESTS</small><strong>{engineeringCase.pilot_plan.required_lab_tests.length}</strong></div>
+                  <div><small>GO / NO-GO</small><strong>{engineeringCase.pilot_plan.go_no_go_criteria.length}</strong></div>
+                  <div><small>MONITORING</small><strong>{monitoringHours} h</strong></div>
+                </section>
+                <div className="engineering-list-grid">
+                  <section><h4>SAMPLING PLAN</h4><ol>{engineeringCase.pilot_plan.sampling_plan.map((item) => <li key={item}>{item}</li>)}</ol></section>
+                  <section><h4>REQUIRED LAB TESTS</h4><ol>{engineeringCase.pilot_plan.required_lab_tests.map((item) => <li key={item}>{item}</li>)}</ol></section>
+                  <section><h4>GO / NO-GO CRITERIA</h4><ol>{engineeringCase.pilot_plan.go_no_go_criteria.map((item) => <li key={item}>{item}</li>)}</ol></section>
+                  <section><h4>MONITORING PLAN</h4><ol>{engineeringCase.pilot_plan.monitoring_plan.map((item) => <li key={item}>{item}</li>)}</ol></section>
+                </div>
+              </details>
+
+              <details><summary>DATA THE PLANT MUST REPLACE OR VERIFY</summary>
+                <div className="table-responsive"><table><thead><tr><th>Category</th><th>Data item</th><th>Why required</th></tr></thead><tbody>{engineeringCase.missing_data.map((item) => <tr key={`${item.category}-${item.item}`}><td>{pretty(item.category)}</td><td>{item.item}</td><td>{item.reason}</td></tr>)}</tbody></table></div>
+              </details>
+
+              <details><summary>IMPORT PILOT ACTUALS / LEARNING</summary>
+                <p className="note">Import pilot or plant actuals. Records enter the audit trail immediately, but the model recalibrates only when PROCEED is approved, all three sign-offs are present, evidence references are attached and calibration use is explicitly authorised.</p>
+                <div className="form-grid two">
+                  <label>ACTUAL OUTPUT T/H<input type="number" step="0.1" value={actuals.actual_output_tph} onChange={(event) => updateActual("actual_output_tph", event.target.value)} /></label>
+                  <label>ACTUAL ELECTRICITY KWH/T<input type="number" step="0.1" value={actuals.actual_electricity_kwh_t} onChange={(event) => updateActual("actual_electricity_kwh_t", event.target.value)} /></label>
+                  <label>ACTUAL THERMAL KCAL/KG<input type="number" step="1" value={actuals.actual_thermal_kcal_kg} onChange={(event) => updateActual("actual_thermal_kcal_kg", event.target.value)} /></label>
+                  <label>ACTUAL VARIABLE COST INR/T<input type="number" step="1" value={actuals.actual_variable_cost_inr_t} onChange={(event) => updateActual("actual_variable_cost_inr_t", event.target.value)} /></label>
+                  <label>ACTUAL MATERIAL CO₂ KG/T<input type="number" step="1" value={actuals.actual_material_co2_kg_t} onChange={(event) => updateActual("actual_material_co2_kg_t", event.target.value)} /></label>
+                  <label>ACTUAL FREE LIME %<input type="number" step="0.01" value={actuals.actual_free_lime_percent} onChange={(event) => updateActual("actual_free_lime_percent", event.target.value)} /></label>
+                  <label>ACTUAL 3-DAY STRENGTH MPA<input type="number" step="0.1" value={actuals.actual_strength_3d_mpa} onChange={(event) => updateActual("actual_strength_3d_mpa", event.target.value)} /></label>
+                  <label>ACTUAL 28-DAY STRENGTH MPA<input type="number" step="0.1" value={actuals.actual_strength_28d_mpa} onChange={(event) => updateActual("actual_strength_28d_mpa", event.target.value)} /></label>
+                  <label>XRF COMPARISON<textarea rows={3} value={actuals.xrf_comparison} onChange={(event) => updateActual("xrf_comparison", event.target.value)} /></label>
+                  <label>XRD COMPARISON<textarea rows={3} value={actuals.xrd_comparison} onChange={(event) => updateActual("xrd_comparison", event.target.value)} /></label>
+                  <label>POWER OBSERVATION<textarea rows={3} value={actuals.power_observation} onChange={(event) => updateActual("power_observation", event.target.value)} /></label>
+                  <label>COAL / FUEL OBSERVATION<textarea rows={3} value={actuals.coal_observation} onChange={(event) => updateActual("coal_observation", event.target.value)} /></label>
+                  <label>THERMAL OBSERVATION<textarea rows={3} value={actuals.thermal_observation} onChange={(event) => updateActual("thermal_observation", event.target.value)} /></label>
+                  <label>ROOT CAUSE<textarea rows={3} value={actuals.root_cause} onChange={(event) => updateActual("root_cause", event.target.value)} /></label>
+                  <label>COMMENTS<textarea rows={3} value={actuals.comments} onChange={(event) => updateActual("comments", event.target.value)} /></label>
+                  <label>DECISION<select value={actuals.decision} onChange={(event) => updateActual("decision", event.target.value as Actuals["decision"])}><option value="hold">HOLD</option><option value="proceed">PROCEED</option><option value="reject">REJECT</option></select></label>
+                  <label>ENGINEER SIGN-OFF<input value={actuals.engineer_signoff} onChange={(event) => updateActual("engineer_signoff", event.target.value)} /></label>
+                  <label>QUALITY HEAD SIGN-OFF<input value={actuals.quality_head_signoff} onChange={(event) => updateActual("quality_head_signoff", event.target.value)} /></label>
+                  <label>PLANT HEAD SIGN-OFF<input value={actuals.plant_head_signoff} onChange={(event) => updateActual("plant_head_signoff", event.target.value)} /></label>
+                  <label>EVIDENCE REFERENCES<textarea rows={3} value={actuals.evidence_references} onChange={(event) => updateActual("evidence_references", event.target.value)} placeholder="One lab report, run log, signed form or source reference per line" /></label>
+                  <label className="check-line"><input type="checkbox" checked={actuals.use_for_calibration} onChange={(event) => updateActual("use_for_calibration", event.target.checked)} /> AUTHORISE THIS SIGNED RECORD FOR CONTROLLED MODEL CALIBRATION</label>
+                </div>
+                <button className="run" disabled={learningLoading} onClick={() => void importActuals()}>{learningLoading ? "CALCULATING PREDICTION ERROR…" : "IMPORT ACTUALS AND RECALIBRATE"}</button>
+
+                {learning && <><section className="summary-grid"><div><small>MAPE</small><strong>{learning.mean_absolute_percent_error === null ? "N/A" : `${learning.mean_absolute_percent_error.toFixed(2)}%`}</strong></div><div><small>CALIBRATION ACCEPTED</small><strong>{learning.accepted_for_calibration ? "YES" : "NO"}</strong></div><div><small>CONFIDENCE BEFORE</small><strong>{learning.confidence_before_percent.toFixed(1)}%</strong></div><div><small>CONFIDENCE AFTER</small><strong>{learning.confidence_after_percent.toFixed(1)}%</strong></div><div><small>ACCEPTED SAMPLES</small><strong>{learning.calibration_sample_count}</strong></div></section>{learning.calibration_rejection_reason && <div className="err">{learning.calibration_rejection_reason}</div>}<div className="engineering-executive">{learning.learning_summary}</div><a className="run button-link" href={`${API}/api/engineering/cases/${engineeringCase.case_id}/package.zip`} target="_blank" rel="noreferrer">RE-EXPORT ENGINEERING PACKAGE WITH ACTUALS</a></>}
+              </details>
+            </>
+          )}
+
+          <div className="module-tool-row">
+            <button type="button" onClick={() => onOpenTool("run-library")}>OPEN RUN HISTORY</button>
+            <button type="button" onClick={() => onOpenTool("library")}>OPEN VERSIONED LIBRARY</button>
+          </div>
+          <WorkflowFooter previous={{ label: "VALIDATION", section: "validation" }} onNavigate={onNavigate} />
         </>
       )}
     </section>
   );
 }
+

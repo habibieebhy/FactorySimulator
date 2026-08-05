@@ -16,7 +16,7 @@ import { BlendWorkspace } from "./BlendWorkspace";
 import { CostBookWorkspace } from "./CostBookWorkspace";
 import { LibraryManager } from "./LibraryManager";
 import { RouteWorkspace } from "./RouteWorkspace";
-import { RetrofitWorkspace } from "./RetrofitWorkspace";
+import { RetrofitWorkspace, type RetrofitProgress, type WorkflowSection, type WorkflowTool } from "./RetrofitWorkspace";
 import type { Blend, CostBook, Machine, Material, QualityMeasurements, Result, Route, RouteRecommendationSet } from "./types";
 
 function number(value: number | null, unit: string, digits = 1): string {
@@ -60,8 +60,59 @@ function ProcessNode({ data }: NodeProps) {
 
 const nodeTypes = { process: ProcessNode };
 
+type PrimaryView = "materials" | "formulation" | "plant" | "retrofit" | "scenarios" | "validation" | "export";
+type DetailView = "material-editor" | "blend-editor" | "machine-editor" | "route-editor" | "cost-editor" | "library" | "run-library";
+type View = PrimaryView | DetailView;
+
+const WORKFLOW_STEPS: Array<{ id: PrimaryView; index: string; label: string; subtitle: string }> = [
+  { id: "materials", index: "01", label: "MATERIALS", subtitle: "Chemistry and evidence" },
+  { id: "formulation", index: "02", label: "FORMULATION", subtitle: "Recipes and bounds" },
+  { id: "plant", index: "03", label: "PLANT", subtitle: "Machines, route and cost" },
+  { id: "retrofit", index: "04", label: "DECISION", subtitle: "Evidence, risk and review" },
+  { id: "scenarios", index: "05", label: "SCENARIOS", subtitle: "Simulate and compare" },
+  { id: "validation", index: "06", label: "VALIDATION", subtitle: "Lab and plant evidence" },
+  { id: "export", index: "07", label: "EXPORT", subtitle: "Workbook, pilot, learning" },
+];
+
+function primaryViewFor(view: View): PrimaryView {
+  switch (view) {
+    case "material-editor":
+    case "library":
+      return "materials";
+    case "blend-editor":
+      return "formulation";
+    case "machine-editor":
+    case "route-editor":
+    case "cost-editor":
+      return "plant";
+    case "run-library":
+      return "export";
+    default:
+      return view;
+  }
+}
+
+function ToolWorkspaceHeader({
+  title,
+  description,
+  backLabel,
+  onBack,
+}: {
+  title: string;
+  description: string;
+  backLabel: string;
+  onBack: () => void;
+}) {
+  return (
+    <section className="tool-workspace-header">
+      <div><small>DETAILED ENGINEERING TOOL</small><h2>{title}</h2><p>{description}</p></div>
+      <button type="button" onClick={onBack}>← {backLabel}</button>
+    </section>
+  );
+}
+
 export function App() {
-  const [view, setView] = useState("console");
+  const [view, setView] = useState<View>("materials");
   const [materials, setMaterials] = useState<Material[]>([]);
   const [archivedMaterials, setArchivedMaterials] = useState<Material[]>([]);
   const [blends, setBlends] = useState<Blend[]>([]);
@@ -95,6 +146,7 @@ export function App() {
   const [result, setResult] = useState<Result | null>(null);
   const [visible, setVisible] = useState(0);
   const [error, setError] = useState("");
+  const [retrofitProgress, setRetrofitProgress] = useState<RetrofitProgress>({ hasStudy: false, hasEngineeringCase: false, selectedCandidateName: null });
 
   async function load() {
     const [loadedMaterials, loadedBlends, loadedMachines, loadedRoutes, loadedCostBooks, loadedRuns] = await Promise.all([
@@ -248,28 +300,90 @@ export function App() {
     setFreeLime(runResult.request.clinker_free_lime_percent?.toString() ?? "");
     const measured = runResult.request.quality_measurements ?? {};
     setQuality((current) => Object.fromEntries(Object.keys(current).map((key) => [key, measured[key as keyof QualityMeasurements]?.toString() ?? ""])) as Record<keyof QualityMeasurements, string>);
-    setView("console");
+    setView("scenarios");
   }
+
+  const activePrimaryView = primaryViewFor(view);
+  const selectedBlendName = selectedBlend?.name ?? "No formulation selected";
+  const selectedRouteName = route?.name ?? "No plant route selected";
+  const selectedCostName = selectedCostBook?.name ?? "Reference commercial basis";
+  const workflowCompletion: Record<PrimaryView, boolean> = {
+    materials: materials.length > 0,
+    formulation: Boolean(blendId),
+    plant: Boolean(routeId),
+    retrofit: retrofitProgress.hasStudy,
+    scenarios: Boolean(result || runs.length),
+    validation: Boolean(result || runs.length),
+    export: retrofitProgress.hasEngineeringCase,
+  };
 
   return (
     <main>
-      <header>
-        <b>BRIXTA CEMENT TWIN LAB</b>
-        <span>{result?.run_id ?? "NO ACTIVE RUN"}</span>
-        <nav>
-          {["console", "blend", "retrofit", "machine", "route", "accuracy", "costs", "runs", "library"].map((item) => (
-            <button className={view === item ? "selected" : ""} onClick={() => setView(item)} key={item}>{item.toUpperCase()}</button>
-          ))}
-        </nav>
+      <header className="app-header">
+        <div className="brand-lockup"><b>BRIXTA</b><span>ENGINEERING DECISION SYSTEM</span></div>
+        <div className="active-run"><small>ACTIVE RUN</small><strong>{result?.run_id ?? "REFERENCE MODE"}</strong></div>
       </header>
 
-      {view === "console" && (
+      <section className="workflow-navigation" aria-label="Engineering workflow navigation">
+        <nav className="workflow-primary-nav">
+          {WORKFLOW_STEPS.map((item) => (
+            <button
+              type="button"
+              key={item.id}
+              className={`${activePrimaryView === item.id ? "selected" : ""} ${workflowCompletion[item.id] ? "complete" : ""}`}
+              onClick={() => setView(item.id)}
+            >
+              <span>{item.index}</span><strong>{item.label}</strong><small>{item.subtitle}</small>
+            </button>
+          ))}
+        </nav>
+        <div className="workflow-context-strip" aria-label="Shared engineering context">
+          <div><small>MATERIALS</small><strong>{materials.length} active records</strong></div>
+          <i>→</i>
+          <div><small>FORMULATION</small><strong>{selectedBlendName}</strong></div>
+          <i>→</i>
+          <div><small>PLANT ROUTE</small><strong>{selectedRouteName}</strong></div>
+          <i>→</i>
+          <div><small>COMMERCIAL BASIS</small><strong>{selectedCostName}</strong></div>
+          <i>→</i>
+          <div><small>TARGET</small><strong>{target.toFixed(1)} t/h</strong></div>
+        </div>
+      </section>
+
+      <div className={(["materials", "formulation", "plant", "retrofit", "export"] as View[]).includes(view) ? "" : "workflow-hidden"}>
+        <RetrofitWorkspace
+          section={(activePrimaryView === "materials" || activePrimaryView === "formulation" || activePrimaryView === "plant" || activePrimaryView === "retrofit" || activePrimaryView === "export" ? activePrimaryView : "retrofit") as WorkflowSection}
+          materials={materials}
+          blends={blends}
+          routes={routes}
+          costBooks={costBooks}
+          baselineBlendId={blendId}
+          routeId={routeId}
+          costBookId={costBookId}
+          targetOutput={target}
+          onBaselineBlendChange={setBlendId}
+          onRouteChange={setRouteId}
+          onCostBookChange={setCostBookId}
+          onTargetOutputChange={setTarget}
+          onNavigate={(section) => setView(section)}
+          onOpenTool={(tool: WorkflowTool) => setView(tool)}
+          onProgressChange={setRetrofitProgress}
+          onBlendCreated={(blend) => { setBlends((current) => [...current, blend]); setBlendId(blend.blend_id); }}
+        />
+      </div>
+
+      {view === "scenarios" && (
         <>
+          <section className="module-heading standalone-module-heading">
+            <div><small>STEP 05 · CONNECTED ENGINEERING WORKFLOW</small><h2>SCENARIOS</h2><p>Run the selected formulation through the selected plant route. Scenario outputs are screening evidence only; no number becomes a recommendation until it passes the Decision gate.</p></div>
+            <div className="module-status"><span>{selectedBlendName}</span><strong>{selectedRouteName}</strong></div>
+          </section>
+          <div className="engineering-safety-banner"><strong>SCENARIO ≠ AUTHORISATION</strong><span>These calculations expose consequences, uncertainty and bottlenecks. Production changes require a versioned Engineering Decision case, blocking validation closure and plant approvals.</span></div>
           <section className="config">
             <label>BLEND<select value={blendId} onChange={(event) => setBlendId(event.target.value)}>{blends.map((blend) => <option value={blend.blend_id} key={blend.blend_id}>{blend.name} · {pretty(blend.blend_class)}</option>)}</select></label>
             <label>ROUTE<select value={routeId} onChange={(event) => setRouteId(event.target.value)}>{routes.map((item) => <option value={item.route_id} key={item.route_id}>{item.name} · {pretty(item.route_kind)}</option>)}</select></label>
             <label>COST BOOK<select value={costBookId} onChange={(event) => setCostBookId(event.target.value)}><option value="">No cost book — use run tariffs</option>{costBooks.map((item) => <option value={item.cost_book_id} key={item.cost_book_id}>{item.name} · v{item.version}</option>)}</select></label>
-            <label>TARGET T/H {selectedOutputProduct}<input type="number" min="0.1" value={target} onChange={(event) => setTarget(Number(event.target.value))} /></label>
+            <label>TARGET T/H {selectedOutputProduct}<input type="number" min="0.1" step="0.1" value={target} onChange={(event) => setTarget(Number(event.target.value))} /></label>
             <button className="run" disabled={!blendId || !routeId} onClick={() => void run().catch((caught) => setError(String(caught)))}>RUN SIMULATION</button>
             <button disabled={!blendId || !routeId} onClick={() => void runVariability().catch((caught) => setError(String(caught)))}>RUN LOW / TYPICAL / HIGH</button>
           </section>
@@ -309,7 +423,7 @@ export function App() {
           <details className="basis-panel">
             <summary>RUN BASIS / TARIFFS / MASS-CONVERSION ASSUMPTIONS</summary>
             <div className="basis-grid">
-              <label>DURATION HOURS<input type="number" min="0.1" value={duration} onChange={(event) => setDuration(Number(event.target.value))} /></label>
+              <label>DURATION HOURS<input type="number" min="0.1" step="0.1" value={duration} onChange={(event) => setDuration(Number(event.target.value))} /></label>
               <label>ELECTRICITY ₹/KWH {selectedCostBook?.electricity_inr_kwh !== null && selectedCostBook?.electricity_inr_kwh !== undefined ? "· COST BOOK" : "· RUN INPUT"}<input type="number" min="0" step="0.1" value={effectiveElectricityTariff} disabled={selectedCostBook?.electricity_inr_kwh !== null && selectedCostBook?.electricity_inr_kwh !== undefined} onChange={(event) => setElectricityTariff(Number(event.target.value))} /></label>
               <label>THERMAL FUEL ₹/MILLION KCAL {selectedCostBook?.thermal_fuel_inr_mkcal !== null && selectedCostBook?.thermal_fuel_inr_mkcal !== undefined ? "· COST BOOK" : "· RUN INPUT"}<input type="number" min="0" value={effectiveThermalTariff} disabled={selectedCostBook?.thermal_fuel_inr_mkcal !== null && selectedCostBook?.thermal_fuel_inr_mkcal !== undefined} onChange={(event) => setThermalTariff(Number(event.target.value))} /></label>
               <label>RAW MEAL → CLINKER YIELD<input type="number" min="0.3" max="1" step="0.01" value={rawMealYield} onChange={(event) => setRawMealYield(Number(event.target.value))} /></label>
@@ -343,17 +457,18 @@ export function App() {
             </div>
           </section>
           {result && <RunReport result={result} />}
+          <div className="workflow-footer standalone-footer"><button type="button" onClick={() => setView("retrofit")}>← DECISION</button><button className="run" type="button" disabled={!result} onClick={() => setView("validation")}>NEXT STEP · VALIDATION →</button></div>
         </>
       )}
 
-      {view === "blend" && <BlendWorkspace materials={materials} blends={blends} onMaterialCreated={(material) => setMaterials((current) => [...current, material])} onBlendCreated={(blend) => { setBlends((current) => [...current, blend]); setBlendId(blend.blend_id); setView("console"); }} />}
-      {view === "retrofit" && <RetrofitWorkspace materials={materials} blends={blends} routes={routes} costBooks={costBooks} onBlendCreated={(blend) => { setBlends((current) => [...current, blend]); setBlendId(blend.blend_id); }} />}
-      {view === "machine" && <MachineGuide done={(machine) => { setMachines((current) => [...current, machine]); setView("route"); }} />}
-      {view === "route" && <RouteWorkspace machines={machines} routes={routes} done={(newRoute) => { setRoutes((current) => [...current, newRoute]); setRouteId(newRoute.route_id); setView("console"); }} />}
-      {view === "accuracy" && <AccuracyWorkspace materials={materials} runs={runs} blendCreated={(blend) => { setBlends((current) => [...current, blend]); setBlendId(blend.blend_id); setView("console"); }} />}
-      {view === "costs" && <CostBookWorkspace materials={materials} costBooks={costBooks} done={(costBook) => { setCostBooks((current) => [...current, costBook]); setCostBookId(costBook.cost_book_id); setView("console"); }} />}
-      {view === "runs" && <RunLibrary runs={runs} openRun={openRun} />}
-      {view === "library" && <LibraryManager materials={materials} archivedMaterials={archivedMaterials} blends={blends} archivedBlends={archivedBlends} machines={machines} archivedMachines={archivedMachines} routes={routes} archivedRoutes={archivedRoutes} costBooks={costBooks} archivedCostBooks={archivedCostBooks} refresh={load} />}
+      {view === "material-editor" && <><ToolWorkspaceHeader title="MATERIAL EDITOR" description="Create or version chemistry, mineralogy, moisture, cost, CO₂ and evidence records. Saved records immediately become available in Formulation, Decision and Scenarios." backLabel="BACK TO MATERIALS" onBack={() => setView("materials")} /><BlendWorkspace initialMode="material" materials={materials} blends={blends} onMaterialCreated={(material) => { setMaterials((current) => [...current, material]); setView("materials"); }} onBlendCreated={(blend) => { setBlends((current) => [...current, blend]); setBlendId(blend.blend_id); setView("formulation"); }} /></>}
+      {view === "blend-editor" && <><ToolWorkspaceHeader title="FORMULATION COMPOSER" description="Build raw-meal, clinker, finished-cement, fuel and reusable nested formulations from the shared material library." backLabel="BACK TO FORMULATION" onBack={() => setView("formulation")} /><BlendWorkspace initialMode="blend" materials={materials} blends={blends} onMaterialCreated={(material) => setMaterials((current) => [...current, material])} onBlendCreated={(blend) => { setBlends((current) => [...current, blend]); setBlendId(blend.blend_id); setView("formulation"); }} /></>}
+      {view === "machine-editor" && <><ToolWorkspaceHeader title="MACHINE ENGINEERING" description="Create equipment records used by every route, capacity calculation and bottleneck analysis." backLabel="BACK TO PLANT" onBack={() => setView("plant")} /><MachineGuide done={(machine) => { setMachines((current) => [...current, machine]); setView("route-editor"); }} /></>}
+      {view === "route-editor" && <><ToolWorkspaceHeader title="PROCESS ROUTE" description="Connect versioned machine records into the plant topology used by Decision and Scenarios." backLabel="BACK TO PLANT" onBack={() => setView("plant")} /><RouteWorkspace machines={machines} routes={routes} done={(newRoute) => { setRoutes((current) => [...current, newRoute]); setRouteId(newRoute.route_id); setView("plant"); }} /></>}
+      {view === "cost-editor" && <><ToolWorkspaceHeader title="COSTS & TARIFFS" description="Version material prices, power, thermal fuel and plant operating-cost assumptions." backLabel="BACK TO PLANT" onBack={() => setView("plant")} /><CostBookWorkspace materials={materials} costBooks={costBooks} done={(costBook) => { setCostBooks((current) => [...current, costBook]); setCostBookId(costBook.cost_book_id); setView("plant"); }} /></>}
+      {view === "validation" && <><section className="module-heading standalone-module-heading"><div><small>STEP 06 · CONNECTED ENGINEERING WORKFLOW</small><h2>VALIDATION</h2><p>Compare predictions with traceable laboratory and plant actuals. Only signed, approved records with evidence references may enter controlled calibration; all other records remain audit evidence only.</p></div><div className="module-status"><span>{runs.length} stored run(s)</span><strong>{result?.run_id ?? "NO ACTIVE RUN"}</strong></div></section><AccuracyWorkspace materials={materials} runs={runs} blendCreated={(blend) => { setBlends((current) => [...current, blend]); setBlendId(blend.blend_id); setView("scenarios"); }} /><div className="workflow-footer standalone-footer"><button type="button" onClick={() => setView("scenarios")}>← SCENARIOS</button><button className="run" type="button" onClick={() => setView("export")}>NEXT STEP · EXPORT →</button></div></>}
+      {view === "run-library" && <><ToolWorkspaceHeader title="RUN HISTORY" description="Review previous scenarios and reopen their exact formulation, route, tariffs and operating basis." backLabel="BACK TO EXPORT" onBack={() => setView("export")} /><RunLibrary runs={runs} openRun={openRun} /></>}
+      {view === "library" && <><ToolWorkspaceHeader title="VERSIONED ENGINEERING LIBRARY" description="Inspect lineage, archive state and dependencies across materials, formulations, machines, routes and costs." backLabel="BACK TO MATERIALS" onBack={() => setView("materials")} /><LibraryManager materials={materials} archivedMaterials={archivedMaterials} blends={blends} archivedBlends={archivedBlends} machines={machines} archivedMachines={archivedMachines} routes={routes} archivedRoutes={archivedRoutes} costBooks={costBooks} archivedCostBooks={archivedCostBooks} refresh={load} /></>}
     </main>
   );
 }
